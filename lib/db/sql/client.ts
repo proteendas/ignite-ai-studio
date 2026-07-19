@@ -10,7 +10,7 @@ import type { DocumentRecord } from '@/lib/types';
 // re-open the sqlite file / re-run schema+seed on every edit).
 // ---------------------------------------------------------------------------
 
-const DB_SYMBOL = Symbol.for('genericai-studio.sqlite-db');
+const DB_SYMBOL = Symbol.for('igniteai-studio.sqlite-db');
 
 interface GlobalWithDb {
   [key: symbol]: Database.Database | undefined;
@@ -59,9 +59,30 @@ function openDb(): Database.Database {
   const schemaSql = fs.readFileSync(resolveSchemaPath(), 'utf-8');
   db.exec(schemaSql);
 
+  migrateExistingTables(db);
   seedDemoDataIfEmpty(db);
 
   return db;
+}
+
+/**
+ * schema.sql only uses CREATE TABLE IF NOT EXISTS, which cannot add columns to
+ * tables that already exist in a deployed database. Columns added after the
+ * initial release are back-filled here, guarded by PRAGMA table_info so the
+ * migration is idempotent and safe to run on every startup.
+ */
+function migrateExistingTables(db: Database.Database): void {
+  const ensureColumn = (table: string, column: string, ddl: string) => {
+    const cols = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+    if (!cols.some((c) => c.name === column)) {
+      db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
+    }
+  };
+
+  ensureColumn('chat_messages', 'token_count', 'token_count INTEGER NOT NULL DEFAULT 0');
+  ensureColumn('chat_messages', 'document_refs', 'document_refs TEXT');
+  ensureColumn('user_preferences', 'connection_type', "connection_type TEXT DEFAULT 'cloud'");
+  ensureColumn('user_preferences', 'auto_approve_json', 'auto_approve_json TEXT');
 }
 
 export function getDb(): Database.Database {
@@ -195,6 +216,8 @@ interface ChatMessageRow {
   role: string;
   content: string;
   meta_json: string | null;
+  token_count: number;
+  document_refs: string | null;
   created_at: string;
 }
 
@@ -204,6 +227,9 @@ export interface ChatMessageRecord {
   role: 'system' | 'user' | 'assistant';
   content: string;
   metaJson: string | null;
+  tokenCount: number;
+  /** JSON array of document ids this message drew on, or null. */
+  documentRefs: string | null;
   createdAt: string;
 }
 
@@ -255,6 +281,8 @@ function mapChatMessageRow(row: ChatMessageRow): ChatMessageRecord {
     role: row.role as ChatMessageRecord['role'],
     content: row.content,
     metaJson: row.meta_json,
+    tokenCount: row.token_count ?? 0,
+    documentRefs: row.document_refs,
     createdAt: row.created_at,
   };
 }
@@ -315,6 +343,11 @@ export function getUserById(id: string): UserRecord | null {
   return row ? mapUserRow(row) : null;
 }
 
+export function updateUserPassword(userId: string, passwordHash: string): void {
+  const db = getDb();
+  db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(passwordHash, userId);
+}
+
 export function markOnboarded(ownerId: string): void {
   const db = getDb();
   db.prepare(`UPDATE users SET onboarded_at = datetime('now') WHERE id = ?`).run(ownerId);
@@ -328,6 +361,8 @@ export function deleteUserData(ownerId: string): void {
     'chat_threads',
     'user_preferences',
     'user_api_keys',
+    'user_connections',
+    'agent_actions',
     'generated_content',
     'usage_events',
     'request_logs',
@@ -335,12 +370,16 @@ export function deleteUserData(ownerId: string): void {
     'activity_events',
   ];
   const tx = db.transaction(() => {
-    // chat_messages are keyed by thread; delete them via their threads first.
+    // chat_messages/thread_summaries are keyed by thread; delete via threads first.
     const threadIds = (
       db.prepare('SELECT id FROM chat_threads WHERE owner_id = ?').all(ownerId) as { id: string }[]
     ).map((r) => r.id);
     const delMsgs = db.prepare('DELETE FROM chat_messages WHERE thread_id = ?');
-    for (const tid of threadIds) delMsgs.run(tid);
+    const delSummary = db.prepare('DELETE FROM thread_summaries WHERE thread_id = ?');
+    for (const tid of threadIds) {
+      delMsgs.run(tid);
+      delSummary.run(tid);
+    }
 
     for (const table of tables) {
       db.prepare(`DELETE FROM ${table} WHERE owner_id = ?`).run(ownerId);
@@ -503,11 +542,22 @@ export function insertChatMessage(msg: {
   role: 'system' | 'user' | 'assistant';
   content: string;
   metaJson?: string | null;
+  tokenCount?: number;
+  documentRefs?: string | null;
 }): ChatMessageRecord {
   const db = getDb();
   db.prepare(
-    `INSERT INTO chat_messages (id, thread_id, role, content, meta_json) VALUES (?, ?, ?, ?, ?)`
-  ).run(msg.id, msg.threadId, msg.role, msg.content, msg.metaJson ?? null);
+    `INSERT INTO chat_messages (id, thread_id, role, content, meta_json, token_count, document_refs)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    msg.id,
+    msg.threadId,
+    msg.role,
+    msg.content,
+    msg.metaJson ?? null,
+    msg.tokenCount ?? 0,
+    msg.documentRefs ?? null
+  );
   db.prepare(`UPDATE chat_threads SET updated_at = datetime('now') WHERE id = ?`).run(msg.threadId);
   const row = db
     .prepare('SELECT * FROM chat_messages WHERE id = ?')
@@ -538,6 +588,313 @@ export function getRecentMessages(threadId: string, limit = 6): ChatMessageRecor
   return rows.reverse().map(mapChatMessageRow);
 }
 
+/** Total messages currently stored for a thread (drives summary regeneration). */
+export function countThreadMessages(threadId: string): number {
+  const db = getDb();
+  const row = db
+    .prepare('SELECT COUNT(*) AS n FROM chat_messages WHERE thread_id = ?')
+    .get(threadId) as { n: number };
+  return row.n;
+}
+
+// ---------------------------------------------------------------------------
+// Thread summaries (token efficiency: compress history older than the window)
+// ---------------------------------------------------------------------------
+
+export interface ThreadSummaryRecord {
+  threadId: string;
+  summary: string;
+  throughMessageCount: number;
+  updatedAt: string;
+}
+
+export function getThreadSummary(threadId: string): ThreadSummaryRecord | null {
+  const db = getDb();
+  const row = db
+    .prepare('SELECT * FROM thread_summaries WHERE thread_id = ?')
+    .get(threadId) as
+    | { thread_id: string; summary: string; through_message_count: number; updated_at: string }
+    | undefined;
+  if (!row) return null;
+  return {
+    threadId: row.thread_id,
+    summary: row.summary,
+    throughMessageCount: row.through_message_count,
+    updatedAt: row.updated_at,
+  };
+}
+
+export function upsertThreadSummary(
+  threadId: string,
+  summary: string,
+  throughMessageCount: number
+): void {
+  const db = getDb();
+  db.prepare(
+    `INSERT INTO thread_summaries (thread_id, summary, through_message_count, updated_at)
+     VALUES (?, ?, ?, datetime('now'))
+     ON CONFLICT(thread_id) DO UPDATE SET
+       summary = excluded.summary,
+       through_message_count = excluded.through_message_count,
+       updated_at = datetime('now')`
+  ).run(threadId, summary, throughMessageCount);
+}
+
+// ---------------------------------------------------------------------------
+// Agent actions (HITL audit trail + paused-loop state)
+// ---------------------------------------------------------------------------
+
+export type AgentActionStatus = 'proposed' | 'approved' | 'rejected' | 'executed' | 'failed';
+
+export interface AgentActionRecord {
+  id: string;
+  threadId: string;
+  ownerId: string;
+  tool: string;
+  summary: string;
+  payloadJson: string;
+  status: AgentActionStatus;
+  resultJson: string | null;
+  stateJson: string | null;
+  decidedAt: string | null;
+  createdAt: string;
+}
+
+interface AgentActionRow {
+  id: string;
+  thread_id: string;
+  owner_id: string;
+  tool: string;
+  summary: string;
+  payload_json: string;
+  status: string;
+  result_json: string | null;
+  state_json: string | null;
+  decided_at: string | null;
+  created_at: string;
+}
+
+function mapAgentActionRow(row: AgentActionRow): AgentActionRecord {
+  return {
+    id: row.id,
+    threadId: row.thread_id,
+    ownerId: row.owner_id,
+    tool: row.tool,
+    summary: row.summary,
+    payloadJson: row.payload_json,
+    status: row.status as AgentActionStatus,
+    resultJson: row.result_json,
+    stateJson: row.state_json,
+    decidedAt: row.decided_at,
+    createdAt: row.created_at,
+  };
+}
+
+export function insertAgentAction(action: {
+  id: string;
+  threadId: string;
+  ownerId: string;
+  tool: string;
+  summary: string;
+  payloadJson: string;
+  status?: AgentActionStatus;
+  stateJson?: string | null;
+}): AgentActionRecord {
+  const db = getDb();
+  db.prepare(
+    `INSERT INTO agent_actions (id, thread_id, owner_id, tool, summary, payload_json, status, state_json)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    action.id,
+    action.threadId,
+    action.ownerId,
+    action.tool,
+    action.summary,
+    action.payloadJson,
+    action.status ?? 'proposed',
+    action.stateJson ?? null
+  );
+  const row = db.prepare('SELECT * FROM agent_actions WHERE id = ?').get(action.id) as AgentActionRow;
+  return mapAgentActionRow(row);
+}
+
+export function getAgentAction(id: string): AgentActionRecord | null {
+  const db = getDb();
+  const row = db.prepare('SELECT * FROM agent_actions WHERE id = ?').get(id) as
+    | AgentActionRow
+    | undefined;
+  return row ? mapAgentActionRow(row) : null;
+}
+
+export function updateAgentAction(
+  id: string,
+  updates: {
+    status?: AgentActionStatus;
+    resultJson?: string | null;
+    payloadJson?: string;
+    decided?: boolean;
+  }
+): void {
+  const db = getDb();
+  if (updates.status !== undefined) {
+    db.prepare('UPDATE agent_actions SET status = ? WHERE id = ?').run(updates.status, id);
+  }
+  if (updates.resultJson !== undefined) {
+    db.prepare('UPDATE agent_actions SET result_json = ? WHERE id = ?').run(updates.resultJson, id);
+  }
+  if (updates.payloadJson !== undefined) {
+    db.prepare('UPDATE agent_actions SET payload_json = ? WHERE id = ?').run(updates.payloadJson, id);
+  }
+  if (updates.decided) {
+    db.prepare(`UPDATE agent_actions SET decided_at = datetime('now') WHERE id = ?`).run(id);
+  }
+}
+
+export function listAgentActions(threadId: string, ownerId: string, limit = 100): AgentActionRecord[] {
+  const db = getDb();
+  const rows = db
+    .prepare(
+      `SELECT * FROM agent_actions WHERE thread_id = ? AND owner_id = ?
+       ORDER BY created_at DESC LIMIT ?`
+    )
+    .all(threadId, ownerId, limit) as AgentActionRow[];
+  return rows.map(mapAgentActionRow);
+}
+
+// ---------------------------------------------------------------------------
+// User connections (encrypted external-service credentials for agent tools)
+// ---------------------------------------------------------------------------
+
+export interface UserConnectionRecord {
+  id: string;
+  ownerId: string;
+  service: string;
+  ciphertext: string;
+  iv: string;
+  authTag: string;
+  label: string;
+  createdAt: string;
+}
+
+interface UserConnectionRow {
+  id: string;
+  owner_id: string;
+  service: string;
+  ciphertext: string;
+  iv: string;
+  auth_tag: string;
+  label: string;
+  created_at: string;
+}
+
+function mapConnectionRow(row: UserConnectionRow): UserConnectionRecord {
+  return {
+    id: row.id,
+    ownerId: row.owner_id,
+    service: row.service,
+    ciphertext: row.ciphertext,
+    iv: row.iv,
+    authTag: row.auth_tag,
+    label: row.label,
+    createdAt: row.created_at,
+  };
+}
+
+export function upsertUserConnection(conn: {
+  id: string;
+  ownerId: string;
+  service: string;
+  ciphertext: string;
+  iv: string;
+  authTag: string;
+  label?: string;
+}): void {
+  const db = getDb();
+  db.prepare(
+    `INSERT INTO user_connections (id, owner_id, service, ciphertext, iv, auth_tag, label)
+     VALUES (?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(owner_id, service) DO UPDATE SET
+       ciphertext = excluded.ciphertext,
+       iv = excluded.iv,
+       auth_tag = excluded.auth_tag,
+       label = excluded.label,
+       created_at = datetime('now')`
+  ).run(conn.id, conn.ownerId, conn.service, conn.ciphertext, conn.iv, conn.authTag, conn.label ?? '');
+}
+
+export function getUserConnection(ownerId: string, service: string): UserConnectionRecord | null {
+  const db = getDb();
+  const row = db
+    .prepare('SELECT * FROM user_connections WHERE owner_id = ? AND service = ?')
+    .get(ownerId, service) as UserConnectionRow | undefined;
+  return row ? mapConnectionRow(row) : null;
+}
+
+export function listUserConnections(ownerId: string): UserConnectionRecord[] {
+  const db = getDb();
+  const rows = db
+    .prepare('SELECT * FROM user_connections WHERE owner_id = ? ORDER BY service')
+    .all(ownerId) as UserConnectionRow[];
+  return rows.map(mapConnectionRow);
+}
+
+export function deleteUserConnection(ownerId: string, service: string): void {
+  const db = getDb();
+  db.prepare('DELETE FROM user_connections WHERE owner_id = ? AND service = ?').run(
+    ownerId,
+    service
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Embedding cache (never embed the same text twice for a provider+model)
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns the cached vectors for the given content hashes as a hash -> vector
+ * map. Hashes with no cache entry are simply absent from the map.
+ */
+export function getCachedEmbeddings(
+  hashes: string[],
+  provider: string,
+  model: string
+): Map<string, number[]> {
+  const db = getDb();
+  const out = new Map<string, number[]>();
+  const stmt = db.prepare(
+    'SELECT vector_json FROM embedding_cache WHERE content_hash = ? AND provider = ? AND model = ?'
+  );
+  for (const hash of hashes) {
+    const row = stmt.get(hash, provider, model) as { vector_json: string } | undefined;
+    if (row) {
+      try {
+        out.set(hash, JSON.parse(row.vector_json) as number[]);
+      } catch {
+        /* corrupt cache entry — treat as miss */
+      }
+    }
+  }
+  return out;
+}
+
+export function putCachedEmbeddings(
+  entries: { hash: string; vector: number[] }[],
+  provider: string,
+  model: string
+): void {
+  if (entries.length === 0) return;
+  const db = getDb();
+  const stmt = db.prepare(
+    `INSERT INTO embedding_cache (content_hash, provider, model, vector_json)
+     VALUES (?, ?, ?, ?)
+     ON CONFLICT(content_hash, provider, model) DO NOTHING`
+  );
+  const tx = db.transaction((rows: { hash: string; vector: number[] }[]) => {
+    for (const row of rows) stmt.run(row.hash, provider, model, JSON.stringify(row.vector));
+  });
+  tx(entries);
+}
+
 // ---------------------------------------------------------------------------
 // Read-only query execution for the Level 2 NL -> SQL router.
 // ---------------------------------------------------------------------------
@@ -562,12 +919,17 @@ export function runReadOnlyQuery(sql: string, params: unknown[] = []): unknown[]
 // User preferences
 // ---------------------------------------------------------------------------
 
+export type ConnectionType = 'cloud' | 'local' | 'auto';
+
 export interface UserPreferences {
   ownerId: string;
   defaultProvider: string | null;
   defaultModel: string | null;
   defaultTone: string;
   theme: string;
+  connectionType: ConnectionType;
+  /** Map of tool name -> true for tools the user auto-approves (HITL opt-in). */
+  autoApprove: Record<string, boolean>;
 }
 
 export function getUserPreferences(ownerId: string): UserPreferences {
@@ -579,14 +941,26 @@ export function getUserPreferences(ownerId: string): UserPreferences {
         default_model: string | null;
         default_tone: string | null;
         theme: string | null;
+        connection_type: string | null;
+        auto_approve_json: string | null;
       }
     | undefined;
+  let autoApprove: Record<string, boolean> = {};
+  if (row?.auto_approve_json) {
+    try {
+      autoApprove = JSON.parse(row.auto_approve_json) as Record<string, boolean>;
+    } catch {
+      autoApprove = {};
+    }
+  }
   return {
     ownerId,
     defaultProvider: row?.default_provider ?? null,
     defaultModel: row?.default_model ?? null,
     defaultTone: row?.default_tone ?? 'professional',
     theme: row?.theme ?? 'dark',
+    connectionType: (row?.connection_type as ConnectionType) ?? 'cloud',
+    autoApprove,
   };
 }
 
@@ -598,14 +972,24 @@ export function upsertUserPreferences(
   const current = getUserPreferences(ownerId);
   const next = { ...current, ...prefs };
   db.prepare(
-    `INSERT INTO user_preferences (owner_id, default_provider, default_model, default_tone, theme)
-     VALUES (?, ?, ?, ?, ?)
+    `INSERT INTO user_preferences (owner_id, default_provider, default_model, default_tone, theme, connection_type, auto_approve_json)
+     VALUES (?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(owner_id) DO UPDATE SET
        default_provider = excluded.default_provider,
        default_model = excluded.default_model,
        default_tone = excluded.default_tone,
-       theme = excluded.theme`
-  ).run(ownerId, next.defaultProvider, next.defaultModel, next.defaultTone, next.theme);
+       theme = excluded.theme,
+       connection_type = excluded.connection_type,
+       auto_approve_json = excluded.auto_approve_json`
+  ).run(
+    ownerId,
+    next.defaultProvider,
+    next.defaultModel,
+    next.defaultTone,
+    next.theme,
+    next.connectionType,
+    JSON.stringify(next.autoApprove ?? {})
+  );
   return next;
 }
 

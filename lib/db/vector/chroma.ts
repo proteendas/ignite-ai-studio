@@ -3,7 +3,10 @@ import { env } from '@/lib/env';
 import { VectorChunk, VectorSearchResult } from '@/lib/types';
 import { VectorStore } from './types';
 
-const COLLECTION_NAME = 'genericai_documents';
+// Renamed from the pre-rebrand 'genericai_documents'. Existing installs keep
+// working because ingestion re-creates the collection; documents uploaded
+// before the rename must be re-uploaded to be searchable.
+const COLLECTION_NAME = 'igniteai_documents';
 
 type ChromaCollection = Awaited<ReturnType<ChromaClient['getOrCreateCollection']>>;
 

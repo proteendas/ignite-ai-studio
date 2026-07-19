@@ -3,6 +3,7 @@
 import { useState, useEffect, FormEvent } from 'react';
 import { useRouter } from 'next/navigation';
 import { signIn, getProviders } from 'next-auth/react';
+import { PasswordInput } from '@/components/ui/PasswordInput';
 
 type Mode = 'signin' | 'signup';
 
@@ -150,15 +151,14 @@ export default function LoginPage() {
             >
               Password
             </label>
-            <input
+            <PasswordInput
               id="password"
-              type="password"
+              value={password}
+              onChange={setPassword}
               required
               minLength={8}
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              className="focus-ignite w-full rounded-lg border border-surface-3 bg-surface-2 px-3 py-2 text-sm text-content placeholder:text-content-muted focus:border-ignite focus:outline-none"
               placeholder="••••••••"
+              autoComplete={mode === 'signin' ? 'current-password' : 'new-password'}
             />
           </div>
 

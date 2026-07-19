@@ -1,7 +1,12 @@
 import { NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth/config';
-import { listConfiguredProviders, type ProviderId } from '@/lib/ai/providerAdapter';
+import {
+  listConfiguredProviders,
+  resolveConnectionType,
+  type ProviderId,
+} from '@/lib/ai/providerAdapter';
+import { detectOllama } from '@/lib/ai/providers/ollama';
 import { activeEmbeddingsProviderId } from '@/lib/ai/embeddingsAdapter';
 import { env } from '@/lib/env';
 
@@ -47,11 +52,15 @@ export async function GET() {
   });
 
   const activeChat = configured[0]?.id ?? null;
+  const connectionType = resolveConnectionType(userId);
+  const local = await detectOllama();
 
   return NextResponse.json({
     providers,
     activeChatProvider: activeChat,
     activeEmbeddingsProvider: activeEmbeddingsProviderId(userId),
     vectorDbProvider: env.vectorDbProvider,
+    connectionType,
+    local,
   });
 }

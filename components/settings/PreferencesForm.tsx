@@ -27,12 +27,36 @@ const TONES: Tone[] = ['professional', 'casual', 'technical', 'persuasive', 'for
 
 const AUTO = 'auto';
 
+type ConnectionType = 'cloud' | 'local' | 'auto';
+
 interface Preferences {
   defaultProvider: string | null;
   defaultModel: string | null;
   defaultTone: string;
   theme: string;
+  connectionType: ConnectionType;
 }
+
+const CONNECTION_TYPES: { value: ConnectionType; icon: string; title: string; description: string }[] = [
+  {
+    value: 'cloud',
+    icon: 'bi-cloud',
+    title: 'Cloud API',
+    description: 'Key-based cloud providers (Groq, OpenAI, Gemini, ...).',
+  },
+  {
+    value: 'local',
+    icon: 'bi-pc-display',
+    title: 'Local',
+    description: 'Ollama on this machine — fully offline, no API key.',
+  },
+  {
+    value: 'auto',
+    icon: 'bi-arrow-left-right',
+    title: 'Auto',
+    description: 'Prefer local when detected, fall back to cloud.',
+  },
+];
 
 function titleCase(value: string): string {
   return value.charAt(0).toUpperCase() + value.slice(1);
@@ -45,6 +69,7 @@ export function PreferencesForm() {
   const [provider, setProvider] = useState<string>(AUTO);
   const [model, setModel] = useState('');
   const [tone, setTone] = useState<string>('professional');
+  const [connectionType, setConnectionType] = useState<ConnectionType>('cloud');
 
   useEffect(() => {
     let cancelled = false;
@@ -58,6 +83,7 @@ export function PreferencesForm() {
         setProvider(preferences.defaultProvider ?? AUTO);
         setModel(preferences.defaultModel ?? '');
         setTone(preferences.defaultTone || 'professional');
+        setConnectionType(preferences.connectionType || 'cloud');
       })
       .catch((err: unknown) => {
         if (!cancelled) toast(err instanceof Error ? err.message : 'Failed to load preferences.', 'error');
@@ -81,6 +107,7 @@ export function PreferencesForm() {
           defaultProvider: provider === AUTO ? null : provider,
           defaultModel: model.trim() || null,
           defaultTone: tone,
+          connectionType,
         }),
       });
       if (!res.ok) throw new Error('Failed to save preferences.');
@@ -107,6 +134,45 @@ export function PreferencesForm() {
         </div>
       ) : (
         <form onSubmit={handleSave} className="space-y-4">
+          <fieldset>
+            <legend className="mb-2 block text-xs text-content-muted">Connection type</legend>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+              {CONNECTION_TYPES.map((ct) => {
+                const selected = connectionType === ct.value;
+                return (
+                  <label
+                    key={ct.value}
+                    className={`focus-ignite cursor-pointer rounded-md border p-3 transition-colors ${
+                      selected
+                        ? 'border-ignite bg-ignite/15 shadow-glow-sm'
+                        : 'border-surface-3 bg-surface-2 hover-glow'
+                    }`}
+                  >
+                    <input
+                      type="radio"
+                      name="pref-connection-type"
+                      value={ct.value}
+                      checked={selected}
+                      onChange={() => setConnectionType(ct.value)}
+                      className="sr-only"
+                    />
+                    <span className="flex items-center gap-2">
+                      <i
+                        className={`bi ${ct.icon} ${selected ? 'text-ignite' : 'text-content-muted'}`}
+                        aria-hidden="true"
+                      />
+                      <span className="text-sm font-medium text-content">{ct.title}</span>
+                      {selected && (
+                        <i className="bi bi-check-circle-fill ml-auto text-ignite" aria-hidden="true" />
+                      )}
+                    </span>
+                    <span className="mt-1 block text-xs text-content-muted">{ct.description}</span>
+                  </label>
+                );
+              })}
+            </div>
+          </fieldset>
+
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <div>
               <label htmlFor="pref-provider" className="mb-1 block text-xs text-content-muted">

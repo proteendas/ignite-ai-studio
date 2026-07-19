@@ -20,6 +20,10 @@ export const PROVIDER_ENV_KEY: Record<ProviderId, string> = {
   'cloudflare-workers-ai': 'CLOUDFLARE_WORKERS_AI_TOKEN',
   together: 'TOGETHER_API_KEY',
   gemini: 'GOOGLE_GEMINI_API_KEY',
+  // Ollama needs no API key. It maps to its base-URL env var purely so the
+  // Record<ProviderId, string> type stays total; candidacy for Ollama is
+  // decided by the connection type (see providerAdapter.ts), never by a key.
+  ollama: 'OLLAMA_BASE_URL',
 };
 
 export type ResolvedKeys = Partial<Record<ProviderId, string>>;

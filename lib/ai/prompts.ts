@@ -32,6 +32,41 @@ export function buildRagSystemPrompt(tone: Tone): string {
 }
 
 /**
+ * System prompt for General mode: plain LLM chat, explicitly NOT grounded in
+ * the user's uploaded documents, so users can never mistake it for RAG output.
+ */
+export function buildGeneralSystemPrompt(tone: Tone): string {
+  return [
+    'You are a helpful general-knowledge AI assistant. This conversation is in General mode: ' +
+      'your answers are NOT grounded in the user\'s uploaded documents, and no document ' +
+      'retrieval has been performed. Do not claim to have read, cited, or consulted any of ' +
+      'the user\'s documents.',
+    'If the user asks about the contents of their own documents, tell them to switch to ' +
+      'Grounded mode so the answer can be retrieved from and cited against their documents.',
+    'Answer from your general knowledge. Be honest about uncertainty rather than guessing ' +
+      'confidently.',
+    `Tone: ${TONE_CLAUSES[tone]}.`,
+  ].join('\n\n');
+}
+
+/**
+ * System prompt for the rolling thread-history summarizer (token efficiency):
+ * compresses everything older than the verbatim history window into a short
+ * summary that is re-injected as a system message.
+ */
+export function buildHistorySummaryPrompt(): string {
+  return [
+    'You compress chat history. Summarize the following conversation transcript between a ' +
+      'user and an AI assistant into a brief running summary.',
+    'Keep it under 150 words. Preserve: concrete facts and figures that were established, ' +
+      'decisions made, user preferences expressed, documents or data sources discussed, and ' +
+      'any open questions or unfinished tasks.',
+    'Write plain prose in the third person (no headings, no bullet lists, no preamble like ' +
+      '"Summary:"). Output only the summary text.',
+  ].join('\n\n');
+}
+
+/**
  * System prompt for the structured-data (SQL) answer flow: answer only from
  * the supplied query results, in natural language, adjusted by tone.
  */

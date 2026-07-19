@@ -1,5 +1,7 @@
-const DEFAULT_CHUNK_SIZE = 1000;
-const DEFAULT_OVERLAP = 150;
+// ~700 tokens per chunk (~4 chars/token) with ~12% overlap so context
+// survives chunk boundaries without bloating the index.
+const DEFAULT_CHUNK_SIZE = 2800;
+const DEFAULT_OVERLAP = 350;
 
 /**
  * Recursive character splitter: tries to break on paragraph, then sentence,

@@ -11,12 +11,26 @@ interface ProviderHealth {
   source: 'user' | 'env' | null;
 }
 
+interface LocalAIHealth {
+  reachable: boolean;
+  baseUrl: string;
+  models: string[];
+}
+
 interface ProviderHealthResponse {
   providers: ProviderHealth[];
   activeChatProvider: string | null;
   activeEmbeddingsProvider: string | null;
   vectorDbProvider: string;
+  connectionType: 'cloud' | 'local' | 'auto';
+  local: LocalAIHealth;
 }
+
+const CONNECTION_TYPE_LABEL: Record<'cloud' | 'local' | 'auto', string> = {
+  cloud: 'Cloud API',
+  local: 'Local (Ollama)',
+  auto: 'Auto (local first)',
+};
 
 function sourceLabel(p: ProviderHealth): string {
   if (!p.configured) return 'Not configured';
@@ -64,7 +78,13 @@ export function ProviderHealthPanel() {
         </div>
       ) : (
         <>
-          <dl className="mb-4 grid grid-cols-1 gap-3 sm:grid-cols-3">
+          <dl className="mb-4 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <div className="rounded-md border border-surface-3 bg-surface-2 p-3">
+              <dt className="text-xs text-content-muted">Connection type</dt>
+              <dd className="mt-1">
+                <Badge tone="brand">{CONNECTION_TYPE_LABEL[data.connectionType]}</Badge>
+              </dd>
+            </div>
             <div className="rounded-md border border-surface-3 bg-surface-2 p-3">
               <dt className="text-xs text-content-muted">Active chat provider</dt>
               <dd className="mt-1">
@@ -92,6 +112,44 @@ export function ProviderHealthPanel() {
               </dd>
             </div>
           </dl>
+
+          <section className="mb-4 rounded-md border border-surface-3 bg-surface-2 p-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <i className="bi bi-hdd-network text-ignite" aria-hidden="true" />
+              <h3 className="text-sm font-semibold text-content">Local AI (Ollama)</h3>
+              {data.local.reachable ? (
+                <Badge tone="success">Reachable</Badge>
+              ) : (
+                <Badge tone="danger">Unreachable</Badge>
+              )}
+              <span className="text-xs text-content-muted">{data.local.baseUrl}</span>
+            </div>
+            {data.local.reachable ? (
+              data.local.models.length > 0 ? (
+                <ul className="mt-2 flex flex-wrap gap-1.5">
+                  {data.local.models.map((m) => (
+                    <li
+                      key={m}
+                      className="rounded-full bg-surface-3 px-2 py-0.5 text-xs text-content"
+                    >
+                      {m}
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="mt-2 text-xs text-content-muted">
+                  Ollama is running but no models are installed yet. Pull one with{' '}
+                  <code className="text-content">ollama pull llama3.2</code>.
+                </p>
+              )
+            ) : (
+              <p className="mt-2 text-xs text-content-muted">
+                Install and run Ollama (ollama.com, then{' '}
+                <code className="text-content">ollama serve</code>) to use IgniteAI without any
+                API key — set the connection type to Local or Auto in Preferences.
+              </p>
+            )}
+          </section>
 
           <ul className="divide-y divide-surface-3 rounded-md border border-surface-3">
             {data.providers.map((p) => (

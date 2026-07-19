@@ -6,6 +6,9 @@ import { Card } from '@/components/ui/Card';
 import { ProviderHealthPanel } from '@/components/providers/ProviderHealthPanel';
 import { ApiKeyManager } from '@/components/settings/ApiKeyManager';
 import { PreferencesForm } from '@/components/settings/PreferencesForm';
+import { ConnectionsManager } from '@/components/settings/ConnectionsManager';
+import { AutoApproveSettings } from '@/components/settings/AutoApproveSettings';
+import { ChangePasswordForm } from '@/components/settings/ChangePasswordForm';
 import { DangerZone } from '@/components/settings/DangerZone';
 
 export default function SettingsPage() {
@@ -43,6 +46,12 @@ export default function SettingsPage() {
         <ApiKeyManager />
 
         <PreferencesForm />
+
+        <ConnectionsManager />
+
+        <AutoApproveSettings />
+
+        <ChangePasswordForm />
 
         <DangerZone />
       </div>

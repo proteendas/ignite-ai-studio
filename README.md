@@ -7,7 +7,17 @@ and structured data and it becomes your studio — dark-mode-first, red/black th
 spec-first (see [`/specs`](./specs)).
 
 - **RAG Chatbot**: upload PDF/DOCX/TXT/MD documents, embed them into a vector store, and get
-  grounded, cited answers.
+  grounded, cited answers. A visible **Grounded / General / Agent** mode toggle shows whether
+  retrieval is active; grounded answers include a Sources panel with the exact chunks and
+  similarity scores used, and chatting with a document is blocked until its ingestion is ready.
+- **Agentic AI with human-in-the-loop**: an extensible tool registry (`lib/ai/tools/`) lets
+  IgniteAI act — read GitHub repos/issues/PRs, create issues, draft and send Gmail — via a
+  ReAct loop (max 6 steps). Every action is shown for **Approve / Edit / Cancel** before it
+  executes; decisions are logged in a per-thread Agent Activity Log. Read-only tools can be
+  auto-approved per tool (off by default); write actions always ask.
+- **Local AI (Ollama)**: run fully offline with no API key — chat and embeddings through a
+  local Ollama server, with a Cloud / Local / Auto connection-type setting (Auto prefers
+  local and falls back to cloud).
 - **Intent-Aware Routing**: questions are automatically classified and routed to either
   document retrieval or a natural-language-to-SQL query against structured data.
 - **Cognitive Assistant**: persisted multi-turn threads (rename/pin/delete), clarification
@@ -137,6 +147,17 @@ provider, since fast chat providers like Groq have no embeddings endpoint.
 **Per-user (BYO) keys**: signed-in users can store their own key per provider in **Settings**,
 encrypted at rest with AES-256-GCM (requires `ENCRYPTION_KEY`). A user key takes precedence over
 the env key for that provider; the plaintext is never returned to the client or logged.
+
+**Local AI (no API key)**: install [Ollama](https://ollama.com), `ollama pull llama3.2` (and
+`ollama pull nomic-embed-text` for local embeddings), then set the Connection Type in Settings
+(or `CONNECTION_TYPE` env) to `local` or `auto`. In Docker, set
+`OLLAMA_BASE_URL=http://host.docker.internal:11434` so the container can reach the host's
+Ollama. Local mode conserves cloud quota — handy for iterative testing.
+
+**Token efficiency**: only top-k chunks are injected (never whole documents), older chat
+history is compressed into a rolling summary, embeddings are cached (identical text is never
+re-embedded), tool outputs are truncated, small internal calls (classification, summarization)
+route to each provider's cheapest model, and a live token counter sits in the chat header.
 
 Check **Settings** in the app to see which provider is actually active at runtime.
 

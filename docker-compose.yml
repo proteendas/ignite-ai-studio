@@ -13,6 +13,10 @@ services:
       - NEXTAUTH_URL=${NEXTAUTH_URL:-http://localhost:3000}
     volumes:
       - sqlite-data:/app/data
+    # Lets the container reach an Ollama server running on the Docker host
+    # (set OLLAMA_BASE_URL=http://host.docker.internal:11434 in .env).
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
     depends_on:
       chroma:
         condition: service_started

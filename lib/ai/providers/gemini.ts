@@ -1,7 +1,11 @@
 import type { ChatMessage } from '@/lib/types';
 import type { AIProvider, ChatOptions } from '../providerAdapter';
 
-const CHAT_MODEL = 'gemini-3.5-flash';
+const CHAT_MODEL = process.env.GEMINI_CHAT_MODEL || 'gemini-3.5-flash';
+// Google retires model aliases from v1beta over time (gemini-1.5-flash 404s
+// today). If the configured model 404s, retry down this list so a stale model
+// name degrades gracefully instead of breaking chat.
+const CHAT_MODEL_FALLBACKS = ['gemini-2.5-flash', 'gemini-2.0-flash'];
 const EMBED_MODEL = 'text-embedding-004';
 const BASE_URL = 'https://generativelanguage.googleapis.com/v1beta';
 
@@ -48,7 +52,7 @@ function extractText(json: any): string {
   return parts.map((p: GeminiPart) => p.text || '').join('');
 }
 
-async function callGenerateContent(
+async function callGenerateContentOnce(
   apiKey: string,
   model: string,
   messages: ChatMessage[],
@@ -72,11 +76,37 @@ async function callGenerateContent(
 
   if (!response.ok) {
     const errorBody = await response.text();
-    throw new Error(`Gemini API error (${response.status}): ${errorBody}`);
+    const error = new Error(`Gemini API error (${response.status}): ${errorBody}`);
+    (error as Error & { status?: number }).status = response.status;
+    throw error;
   }
 
   const json = await response.json();
   return extractText(json);
+}
+
+async function callGenerateContent(
+  apiKey: string,
+  model: string,
+  messages: ChatMessage[],
+  opts?: ChatOptions
+): Promise<string> {
+  const candidates = [model, ...CHAT_MODEL_FALLBACKS.filter((m) => m !== model)];
+  let lastError: unknown;
+  for (const candidate of candidates) {
+    try {
+      return await callGenerateContentOnce(apiKey, candidate, messages, opts);
+    } catch (err) {
+      lastError = err;
+      // 404 = this model name doesn't exist for this key. 429 = quota
+      // exhausted — Gemini free-tier quotas are PER MODEL, so another model
+      // in the chain may still have headroom. Anything else (auth, bad
+      // request) won't be fixed by switching models: surface it immediately.
+      const status = (err as Error & { status?: number }).status;
+      if (status !== 404 && status !== 429) throw err;
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
 }
 
 /**

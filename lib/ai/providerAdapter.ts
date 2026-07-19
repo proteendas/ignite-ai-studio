@@ -5,7 +5,11 @@ import { createGeminiProvider } from './providers/gemini';
 import { createCohereProvider } from './providers/cohere';
 import { createHuggingFaceProvider } from './providers/huggingface';
 import { createCloudflareWorkersAIProvider } from './providers/cloudflareWorkersAI';
+import { createOllamaProvider } from './providers/ollama';
 import { resolveProviderKeys, type ResolvedKeys } from './keyResolver';
+import { getUserPreferences, type ConnectionType } from '@/lib/db/sql/client';
+
+export type { ConnectionType };
 
 export interface ChatOptions {
   temperature?: number;
@@ -33,8 +37,14 @@ export type ProviderId =
   | 'github-models'
   | 'cloudflare-workers-ai'
   | 'together'
-  | 'gemini';
+  | 'gemini'
+  | 'ollama';
 
+/**
+ * Cloud provider priority. Ollama is intentionally NOT in this list — it is
+ * added as a candidate only by connection type ('local'/'auto'), never in
+ * 'cloud' mode.
+ */
 const PRIORITY_ORDER: ProviderId[] = [
   'groq',
   'openai',
@@ -62,9 +72,30 @@ function isConfigured(id: ProviderId, keys: ResolvedKeys): boolean {
       return hasKey && !!process.env.AZURE_OPENAI_ENDPOINT;
     case 'cloudflare-workers-ai':
       return hasKey && !!process.env.CLOUDFLARE_ACCOUNT_ID;
+    case 'ollama':
+      // Ollama needs no key; whether it is a candidate is decided by the
+      // effective connection type, and reachability is checked at call time.
+      return true;
     default:
       return hasKey;
   }
+}
+
+/**
+ * Resolves the effective connection type: the user's stored preference when a
+ * userId is given, otherwise the CONNECTION_TYPE env var, defaulting to 'cloud'.
+ */
+export function resolveConnectionType(userId?: string): ConnectionType {
+  if (userId) {
+    try {
+      return getUserPreferences(userId).connectionType;
+    } catch {
+      // Preferences unavailable (e.g. DB not initialized) — fall through to env.
+    }
+  }
+  const fromEnv = (process.env.CONNECTION_TYPE || '').trim().toLowerCase();
+  if (fromEnv === 'cloud' || fromEnv === 'local' || fromEnv === 'auto') return fromEnv;
+  return 'cloud';
 }
 
 /**
@@ -88,7 +119,7 @@ function buildProvider(id: ProviderId, keys: ResolvedKeys): AIProvider {
         id: 'groq',
         apiKey,
         baseURL: 'https://api.groq.com/openai/v1',
-        chatModel: 'llama-3.1-70b-versatile',
+        chatModel: 'llama-3.3-70b-versatile',
         // Groq has no embeddings endpoint — embed() will throw if called.
       });
     case 'mistral':
@@ -135,6 +166,8 @@ function buildProvider(id: ProviderId, keys: ResolvedKeys): AIProvider {
       return createHuggingFaceProvider(apiKey);
     case 'cloudflare-workers-ai':
       return createCloudflareWorkersAIProvider(apiKey);
+    case 'ollama':
+      return createOllamaProvider();
     default: {
       const _exhaustive: never = id;
       throw new Error(`Unknown provider id: ${_exhaustive}`);
@@ -241,9 +274,23 @@ export function withFallback(getProviders: () => AIProvider[]): AIProvider {
  */
 export function resolveProvider(userId?: string): AIProvider {
   const keys = resolveProviderKeys(userId);
+  const connectionType = resolveConnectionType(userId);
+
+  if (connectionType === 'local') {
+    // Local mode: Ollama only. Wrap its errors so a failure at call time
+    // clearly explains that local mode is selected and Ollama is unreachable.
+    return withFallback(() => [localModeProvider()]);
+  }
+
   const requested = (process.env.AI_PROVIDER || '').trim() as ProviderId | '';
 
   const candidateIds: ProviderId[] = [];
+
+  if (connectionType === 'auto') {
+    // Prefer local: Ollama goes first; withFallback moves past it to the
+    // cloud candidates below if the server is not reachable at call time.
+    candidateIds.push('ollama');
+  }
 
   if (requested && PRIORITY_ORDER.includes(requested) && isConfigured(requested, keys)) {
     candidateIds.push(requested);
@@ -259,11 +306,82 @@ export function resolveProvider(userId?: string): AIProvider {
     throw new Error(
       'No AI provider is configured. Set AI_PROVIDER and the matching API key (in .env, or ' +
         'per-user in Settings), or set any supported provider key (e.g. GROQ_API_KEY, ' +
-        'OPENAI_API_KEY, MISTRAL_API_KEY, ...).'
+        'OPENAI_API_KEY, MISTRAL_API_KEY, ...). Alternatively, run Ollama locally and set ' +
+        'the connection type to "local" or "auto" — no API key needed.'
     );
   }
 
   return withFallback(() => candidateIds.map((id) => buildProvider(id, keys)));
+}
+
+/**
+ * Ollama wrapped with local-mode error context: when the user has explicitly
+ * selected connection type 'local' there is no cloud fallback, so failures
+ * must say exactly why chat is down and how to fix it.
+ */
+function localModeProvider(): AIProvider {
+  const inner = createOllamaProvider();
+  const contextualize = (err: unknown): Error =>
+    new Error(
+      `Connection type is set to "local" but the local Ollama server failed: ${
+        err instanceof Error ? err.message : String(err)
+      } Switch the connection type to "cloud" or "auto" in Settings to use a cloud provider instead.`
+    );
+
+  return {
+    id: inner.id,
+    chatModel: inner.chatModel,
+    async chat(messages: ChatMessage[], opts?: ChatOptions): Promise<string> {
+      try {
+        return await inner.chat(messages, opts);
+      } catch (err) {
+        throw contextualize(err);
+      }
+    },
+    async *chatStream(messages: ChatMessage[], opts?: ChatOptions): AsyncIterable<string> {
+      try {
+        yield* inner.chatStream(messages, opts);
+      } catch (err) {
+        throw contextualize(err);
+      }
+    },
+    async embed(texts: string[]): Promise<number[][]> {
+      try {
+        return await inner.embed(texts);
+      } catch (err) {
+        throw contextualize(err);
+      }
+    },
+  };
+}
+
+/**
+ * A cheaper/faster model per provider for small internal calls
+ * (classification, query rewriting, summarization). Returns undefined when
+ * the provider has no obvious light tier — callers should then use the
+ * provider's default chat model.
+ */
+export function lightModelFor(id: string): string | undefined {
+  switch (id) {
+    case 'groq':
+      return 'llama-3.1-8b-instant';
+    case 'openai':
+      return 'gpt-4o-mini';
+    case 'gemini':
+      // Deliberately no override: Gemini free-tier quota is per model and
+      // varies by key, so pinning a "light" model here can hit a model with
+      // zero quota. The provider's own model-fallback chain (404/429-aware)
+      // picks the cheapest working model instead.
+      return undefined;
+    case 'mistral':
+      return 'mistral-small-latest';
+    case 'openrouter':
+      return 'meta-llama/llama-3.1-8b-instruct:free';
+    case 'ollama':
+      return process.env.OLLAMA_MODEL || 'llama3.2';
+    default:
+      return undefined;
+  }
 }
 
 /**
@@ -276,9 +394,19 @@ export function listConfiguredProviders(userId?: string): {
 }[] {
   const envKeys = resolveProviderKeys(undefined);
   const allKeys = resolveProviderKeys(userId);
-  return PRIORITY_ORDER.filter((id) => isConfigured(id, allKeys)).map((id) => ({
+  const connectionType = resolveConnectionType(userId);
+
+  const cloud: { id: ProviderId; source: 'user' | 'env' }[] = PRIORITY_ORDER.filter((id) =>
+    isConfigured(id, allKeys)
+  ).map((id) => ({
     id,
     // If the key exists with a userId but not without, it came from the user.
     source: allKeys[id] && !envKeys[id] ? 'user' : 'env',
   }));
+
+  // Ollama is a candidate (listed first) whenever the effective connection
+  // type is 'local' or 'auto'; in 'cloud' mode it is never a candidate.
+  if (connectionType === 'local') return [{ id: 'ollama', source: 'env' }];
+  if (connectionType === 'auto') return [{ id: 'ollama', source: 'env' }, ...cloud];
+  return cloud;
 }

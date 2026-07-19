@@ -38,6 +38,31 @@ Tailwind exposes these as `ignite.*`, `surface.*`, `text.*`. `darkMode: 'class'`
 - `POST /api/account/delete` — cascade delete all user data (SQL + vector).
 - `POST /api/onboarding/complete` — set `onboarded_at`.
 
+## Upgrade 2 additions (2026-07-19)
+
+### Data model
+- `chat_messages`: + `token_count INTEGER`, `document_refs TEXT` (JSON doc-id array). Idempotent `ALTER TABLE` migrations in `client.ts` cover pre-existing databases.
+- `thread_summaries`: thread_id PK, summary, through_message_count, updated_at — rolling compression of history older than the 8-message verbatim window.
+- `agent_actions`: id, thread_id, owner_id, tool, summary, payload_json, status ('proposed'→'approved'/'rejected'→'executed'/'failed'), result_json, state_json (paused ReAct loop), decided_at, created_at.
+- `user_connections`: id, owner_id, service ('github'|'google-gmail'), ciphertext/iv/auth_tag (AES-256-GCM), label, UNIQUE(owner_id, service).
+- `embedding_cache`: (content_hash, provider, model) PK → vector_json. Never re-embed identical text.
+- `user_preferences`: + `connection_type` ('cloud'|'local'|'auto'), `auto_approve_json`.
+
+### API contracts
+- `POST /api/chat` — + `mode: 'grounded'|'general'` (grounded default; retrieval mandatory), `documentId` gated on ingestion status `ready` (409 otherwise); SSE `done` now carries token counts; citations carry similarity scores.
+- `POST /api/agent` — agent-mode turn; SSE `meta | step | action_request | token | done | error`; stream closes on `action_request` awaiting decision.
+- `GET /api/agent/actions?threadId=` / `POST /api/agent/actions/:id {decision, payload?}` — activity log + HITL decision; approval resumes the loop in a fresh SSE stream.
+- `GET/POST /api/connections`, `DELETE /api/connections/:service`, `GET /api/connections/google/{start,callback}` — encrypted tool credentials (GitHub PAT, Gmail OAuth).
+- `POST /api/auth/change-password` — credentials accounts only.
+- `GET /api/provider-health` — + `local {reachable, baseUrl, models[]}` (Ollama detection) and effective `connectionType`.
+- `GET /api/documents/:id` — single-document status (drives the in-chat ingestion card polling).
+
+### Module map
+- `lib/ai/tools/` (registry + github + email), `lib/ai/agent/` (ReAct loop + prompts, max 6 steps).
+- `lib/ai/providers/ollama.ts` — local provider behind the same `AIProvider` interface; `lightModelFor()` routes small internal calls to cheap models.
+- `components/agent/` (AgentApprovalCard, AgentActivityLog), `components/chat/CitationsPanel`, mode toggle, in-chat upload card, session token counter.
+- `app/icon.svg` — browser tab icon (flame on dark rounded square), auto-served by Next.
+
 ## Provider key resolution (updated)
 `resolveProvider()` / `embeddingsAdapter` now check, in order: (1) the requesting user's decrypted `user_api_keys` for the provider, (2) `process.env`. This makes BYO-key per-user work while keeping env fallback. Key material is fetched server-side at call time only.
 

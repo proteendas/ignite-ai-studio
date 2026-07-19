@@ -1,4 +1,8 @@
+import { createHash } from 'node:crypto';
 import { resolveKeyForProvider } from './keyResolver';
+import { resolveConnectionType } from './providerAdapter';
+import { createOllamaProvider, ollamaEmbeddingModel } from './providers/ollama';
+import { getCachedEmbeddings, putCachedEmbeddings } from '@/lib/db/sql/client';
 
 /**
  * Embeddings adapter (C6).
@@ -7,9 +11,15 @@ import { resolveKeyForProvider } from './keyResolver';
  * is one env var (`EMBEDDINGS_PROVIDER`). Default: Google Gemini (generous free
  * tier, strong multilingual, large context). Fallback: Hugging Face
  * sentence-transformers (free tier). Per-user keys are preferred over env keys.
+ * Local option: Ollama (`EMBEDDINGS_PROVIDER=ollama`, no API key) — also the
+ * automatic default whenever the effective connection type is 'local', so
+ * local mode works fully offline.
+ *
+ * All providers share a persistent embedding cache keyed by
+ * sha256(text) + provider + model, so identical chunks are never re-embedded.
  */
 
-export type EmbeddingsProviderId = 'gemini' | 'huggingface';
+export type EmbeddingsProviderId = 'gemini' | 'huggingface' | 'ollama';
 
 export interface EmbeddingsProvider {
   id: EmbeddingsProviderId;
@@ -105,15 +115,40 @@ function createHuggingFaceEmbeddings(apiKey: string): EmbeddingsProvider {
   };
 }
 
+// --- Ollama (local, no API key) ----------------------------------------------
+
+export function createOllamaEmbeddings(): EmbeddingsProvider {
+  const provider = createOllamaProvider();
+  return {
+    id: 'ollama',
+    model: ollamaEmbeddingModel(),
+    embed: (texts: string[]) => provider.embed(texts),
+  };
+}
+
 // --- Resolution -------------------------------------------------------------
 
 /**
  * Resolves the embeddings provider from `EMBEDDINGS_PROVIDER` (default gemini),
  * using the user's key if present else env. Throws an actionable error when the
  * selected provider has no key configured.
+ *
+ * Connection type interaction: when the effective connection type is 'local'
+ * and EMBEDDINGS_PROVIDER is unset, Ollama is used so local mode needs no API
+ * key at all. 'auto' keeps the cloud default (gemini) unless
+ * EMBEDDINGS_PROVIDER=ollama is set explicitly.
  */
 export function resolveEmbeddingsProvider(userId?: string): EmbeddingsProvider {
-  const selected = (process.env.EMBEDDINGS_PROVIDER || 'gemini').trim().toLowerCase();
+  const explicit = (process.env.EMBEDDINGS_PROVIDER || '').trim().toLowerCase();
+
+  if (explicit === 'ollama') {
+    return createOllamaEmbeddings();
+  }
+  if (!explicit && resolveConnectionType(userId) === 'local') {
+    return createOllamaEmbeddings();
+  }
+
+  const selected = explicit || 'gemini';
 
   if (selected === 'huggingface') {
     const key = resolveKeyForProvider('huggingface', userId);
@@ -136,14 +171,77 @@ export function resolveEmbeddingsProvider(userId?: string): EmbeddingsProvider {
 
   throw new Error(
     'No embeddings provider is configured. Set EMBEDDINGS_PROVIDER=gemini with ' +
-      'GOOGLE_GEMINI_API_KEY (recommended, free tier), or EMBEDDINGS_PROVIDER=huggingface ' +
-      'with HUGGINGFACE_API_KEY. Keys can also be set per-user in Settings.'
+      'GOOGLE_GEMINI_API_KEY (recommended, free tier), EMBEDDINGS_PROVIDER=huggingface ' +
+      'with HUGGINGFACE_API_KEY, or EMBEDDINGS_PROVIDER=ollama for local embeddings ' +
+      'with no API key. Keys can also be set per-user in Settings.'
   );
 }
 
-/** Main entry point business logic calls to embed a batch of texts. */
+function sha256Hex(text: string): string {
+  return createHash('sha256').update(text).digest('hex');
+}
+
+/**
+ * Main entry point business logic calls to embed a batch of texts.
+ *
+ * Token efficiency: every text is content-hashed and looked up in the
+ * persistent embedding cache (per provider+model) first; only cache misses are
+ * sent to the provider (duplicates within the batch are embedded once), and
+ * fresh vectors are written back. Input order is preserved in the result.
+ */
 export async function embedTexts(texts: string[], userId?: string): Promise<number[][]> {
-  return resolveEmbeddingsProvider(userId).embed(texts);
+  if (texts.length === 0) return [];
+
+  const provider = resolveEmbeddingsProvider(userId);
+  const hashes = texts.map(sha256Hex);
+
+  let cached = new Map<string, number[]>();
+  try {
+    cached = getCachedEmbeddings([...new Set(hashes)], provider.id, provider.model);
+  } catch {
+    // A cache read failure must never block embedding — fall through and
+    // embed everything.
+  }
+
+  const results: (number[] | undefined)[] = hashes.map((h) => cached.get(h));
+
+  // Collect unique misses, preserving first-seen order.
+  const misses: { hash: string; text: string }[] = [];
+  const queued = new Set<string>();
+  for (let i = 0; i < texts.length; i++) {
+    if (!results[i] && !queued.has(hashes[i])) {
+      queued.add(hashes[i]);
+      misses.push({ hash: hashes[i], text: texts[i] });
+    }
+  }
+
+  if (misses.length > 0) {
+    const vectors = await provider.embed(misses.map((m) => m.text));
+    if (vectors.length !== misses.length) {
+      throw new Error(
+        `Embeddings provider "${provider.id}" returned ${vectors.length} vectors for ` +
+          `${misses.length} inputs.`
+      );
+    }
+
+    const fresh = new Map<string, number[]>();
+    misses.forEach((m, i) => fresh.set(m.hash, vectors[i]));
+    try {
+      putCachedEmbeddings(
+        misses.map((m, i) => ({ hash: m.hash, vector: vectors[i] })),
+        provider.id,
+        provider.model
+      );
+    } catch {
+      // A cache write failure must never fail the embed call itself.
+    }
+
+    for (let i = 0; i < texts.length; i++) {
+      if (!results[i]) results[i] = fresh.get(hashes[i]);
+    }
+  }
+
+  return results as number[][];
 }
 
 /** Which embeddings provider id is active (for status display); null if none configured. */

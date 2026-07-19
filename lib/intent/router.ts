@@ -1,4 +1,4 @@
-import { AIProvider } from '@/lib/ai/providerAdapter';
+import { AIProvider, ChatOptions } from '@/lib/ai/providerAdapter';
 import { buildClarificationCheckPrompt } from '@/lib/ai/prompts';
 
 export type IntentRoute = 'document' | 'structured-data' | 'compound' | 'general';
@@ -38,14 +38,15 @@ function safeParseJson<T>(text: string): T | null {
 
 export async function classifyIntent(
   provider: AIProvider,
-  question: string
+  question: string,
+  opts?: ChatOptions
 ): Promise<IntentClassification> {
   const raw = await provider.chat(
     [
       { role: 'system', content: CLASSIFIER_SYSTEM_PROMPT },
       { role: 'user', content: question },
     ],
-    { temperature: 0 }
+    { ...opts, temperature: 0 }
   );
 
   const parsed = safeParseJson<{ route?: string; subQueries?: string[] | null }>(raw);
@@ -76,14 +77,15 @@ export interface ClarificationCheck {
 
 export async function checkNeedsClarification(
   provider: AIProvider,
-  question: string
+  question: string,
+  opts?: ChatOptions
 ): Promise<ClarificationCheck> {
   const raw = await provider.chat(
     [
       { role: 'system', content: buildClarificationCheckPrompt() },
       { role: 'user', content: question },
     ],
-    { temperature: 0 }
+    { ...opts, temperature: 0 }
   );
 
   const parsed = safeParseJson<{ ambiguous?: boolean; question?: string | null }>(raw);

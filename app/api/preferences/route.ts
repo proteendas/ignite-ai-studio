@@ -45,6 +45,31 @@ export async function PUT(req: NextRequest) {
   if (typeof body.theme === 'string') {
     patch.theme = body.theme;
   }
+  if ('connectionType' in body) {
+    const ct = body.connectionType;
+    if (ct !== 'cloud' && ct !== 'local' && ct !== 'auto') {
+      return NextResponse.json(
+        { error: 'connectionType must be one of: cloud, local, auto.' },
+        { status: 400 }
+      );
+    }
+    patch.connectionType = ct;
+  }
+  if ('autoApprove' in body) {
+    const aa = body.autoApprove;
+    const isBooleanMap =
+      typeof aa === 'object' &&
+      aa !== null &&
+      !Array.isArray(aa) &&
+      Object.values(aa).every((v) => typeof v === 'boolean');
+    if (!isBooleanMap) {
+      return NextResponse.json(
+        { error: 'autoApprove must be an object mapping tool names to booleans.' },
+        { status: 400 }
+      );
+    }
+    patch.autoApprove = aa as Record<string, boolean>;
+  }
 
   const preferences = upsertUserPreferences(session.user.id, patch);
   return NextResponse.json({ preferences });
