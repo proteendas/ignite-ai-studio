@@ -1,0 +1,32 @@
+# Development override: hot-reload via `next dev`, source mounted as a volume.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
+#
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: deps
+    command: sh -c "npm install && npm run dev"
+    ports:
+      - '3000:3000'
+    env_file:
+      - .env
+    environment:
+      - CHROMA_URL=http://chroma:8000
+      - SQLITE_PATH=/app/data/app.db
+      - NEXTAUTH_URL=${NEXTAUTH_URL:-http://localhost:3000}
+      - WATCHPACK_POLLING=true
+    volumes:
+      - .:/app
+      - /app/node_modules
+      - /app/.next
+      - sqlite-data:/app/data
+    depends_on:
+      chroma:
+        condition: service_started
+
+volumes:
+  sqlite-data:

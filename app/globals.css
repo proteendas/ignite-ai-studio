@@ -1,0 +1,78 @@
+@import 'bootstrap-icons/font/bootstrap-icons.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * Theme tokens as RGB channel triplets so Tailwind's `<alpha-value>` (e.g.
+ * bg-ignite/15) works. The SAME utility classes (bg-surface-1, text-content,
+ * bg-ignite/15, …) resolve to different colors depending on the `.dark` class
+ * on <html>, so the theme toggle flips the entire UI with no per-component
+ * `dark:` variants. Light is the base; `.dark` overrides. Dark is the default
+ * (html starts with `.dark`, see app/layout.tsx).
+ */
+:root {
+  --c-base: 255 255 255;
+  --c-surface-1: 245 245 245;
+  --c-surface-2: 235 235 235;
+  --c-surface-3: 212 212 212;
+  --c-content: 10 10 10;
+  --c-content-muted: 90 90 90;
+  --c-ignite: 237 21 21;
+  --c-ignite-dark: 179 15 15;
+  --c-ignite-light: 210 12 12; /* darker in light mode for AA contrast on white */
+
+  /* Legacy named vars still referenced by .focus-ignite */
+  --ignite-red: #ed1515;
+  --ignite-red-light: #ed1515;
+}
+
+html.dark {
+  --c-base: 0 0 0;
+  --c-surface-1: 10 10 10;
+  --c-surface-2: 26 26 26;
+  --c-surface-3: 38 38 38;
+  --c-content: 245 245 245;
+  --c-content-muted: 115 115 115;
+  --c-ignite: 237 21 21;
+  --c-ignite-dark: 179 15 15;
+  --c-ignite-light: 255 77 77;
+
+  --ignite-red-light: #ff4d4d;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  background-color: rgb(var(--c-base));
+  color: rgb(var(--c-content));
+}
+
+@layer components {
+  /* Red hover glow for interactive surfaces. */
+  .hover-glow {
+    transition: box-shadow 0.2s ease, transform 0.2s ease;
+  }
+  .hover-glow:hover {
+    box-shadow: 0 0 0 1px rgba(237, 21, 21, 0.35), 0 0 18px -2px rgba(237, 21, 21, 0.45);
+  }
+
+  /* Accessible focus ring in the ignite palette. */
+  .focus-ignite:focus-visible {
+    outline: 2px solid var(--ignite-red-light);
+    outline-offset: 2px;
+  }
+}
+
+/* Reduced-motion users get no animation. */
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}

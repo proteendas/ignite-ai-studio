@@ -1,0 +1,36 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - '${APP_PORT:-3000}:3000'
+    env_file:
+      - .env
+    environment:
+      - CHROMA_URL=http://chroma:8000
+      - SQLITE_PATH=/app/data/app.db
+      - NEXTAUTH_URL=${NEXTAUTH_URL:-http://localhost:3000}
+    volumes:
+      - sqlite-data:/app/data
+    depends_on:
+      chroma:
+        condition: service_started
+    restart: unless-stopped
+
+  chroma:
+    # Pinned to a v1-API-compatible release. The chromadb@1.9.2 npm client
+    # talks to Chroma's /api/v1 endpoints, which were removed in Chroma 0.6.0+
+    # (the :latest image returns "410 Gone" for /api/v1). Do not bump this to
+    # :latest without also upgrading the chromadb client to a v2-compatible
+    # version and adjusting lib/db/vector/chroma.ts.
+    image: chromadb/chroma:0.5.23
+    ports:
+      - '${CHROMA_PORT:-8000}:8000'
+    volumes:
+      - chroma-data:/chroma/chroma
+    restart: unless-stopped
+
+volumes:
+  sqlite-data:
+  chroma-data:
