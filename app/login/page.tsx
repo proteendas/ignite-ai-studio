@@ -224,8 +224,9 @@ export default function LoginPage() {
                 <button
                   type="button"
                   onClick={() => signIn('google', { callbackUrl: '/dashboard' })}
-                  className="focus-ignite hover-glow w-full rounded-lg border border-surface-3 bg-surface-2 px-4 py-2 text-sm font-medium text-content transition hover:bg-surface-3"
+                  className="focus-ignite hover-glow w-full rounded-lg border border-surface-3 bg-surface-2 px-4 py-2 text-sm font-medium text-content transition hover:bg-surface-3 gap-2 flex items-center justify-center"
                 >
+                  <i className="bi bi-google"></i>
                   Continue with Google
                 </button>
               )}
@@ -233,8 +234,9 @@ export default function LoginPage() {
                 <button
                   type="button"
                   onClick={() => signIn('github', { callbackUrl: '/dashboard' })}
-                  className="focus-ignite hover-glow w-full rounded-lg border border-surface-3 bg-surface-2 px-4 py-2 text-sm font-medium text-content transition hover:bg-surface-3"
+                  className="focus-ignite hover-glow w-full rounded-lg border border-surface-3 bg-surface-2 px-4 py-2 text-sm font-medium text-content transition hover:bg-surface-3 gap-2 flex items-center justify-center"
                 >
+                  <i className="bi bi-github"></i>
                   Continue with GitHub
                 </button>
               )}
