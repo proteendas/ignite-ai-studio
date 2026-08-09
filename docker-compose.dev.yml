@@ -17,7 +17,6 @@ services:
     environment:
       - CHROMA_URL=http://chroma:8000
       - SQLITE_PATH=/app/data/app.db
-      - NEXTAUTH_URL=${NEXTAUTH_URL:-http://localhost:3000}
       - WATCHPACK_POLLING=true
     volumes:
       - .:/app

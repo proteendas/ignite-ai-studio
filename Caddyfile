@@ -1,0 +1,10 @@
+# EC2 public DNS has no TLS cert available (Let's Encrypt can't issue for an
+# amazonaws.com hostname you don't control) — serve plain HTTP on :80.
+# If you later attach a real domain you own, switch the address below to that
+# domain and Caddy will auto-provision HTTPS on :443 with zero other changes.
+:80 {
+	# Next.js app (NextAuth, API routes, UI) — everything by default.
+	reverse_proxy app:3000
+
+	encode gzip
+}

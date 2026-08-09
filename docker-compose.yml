@@ -10,7 +10,6 @@ services:
     environment:
       - CHROMA_URL=http://chroma:8000
       - SQLITE_PATH=/app/data/app.db
-      - NEXTAUTH_URL=${NEXTAUTH_URL:-http://localhost:3000}
     volumes:
       - sqlite-data:/app/data
     # Lets the container reach an Ollama server running on the Docker host

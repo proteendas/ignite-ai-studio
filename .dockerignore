@@ -3,6 +3,7 @@ node_modules
 .env
 .env.local
 .env*.local
+.env.production
 data/
 *.log
 .git

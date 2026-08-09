@@ -1,0 +1,40 @@
+# Production override for EC2 deployment: app + chroma stay internal-only,
+# Caddy is the sole public entrypoint (ports 80/443).
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+#
+services:
+  app:
+    ports: !reset []
+    expose:
+      - '3000'
+    env_file:
+      - .env.production
+    environment:
+      - CHROMA_URL=http://chroma:8000
+      - SQLITE_PATH=/app/data/app.db
+
+  chroma:
+    ports: !reset []
+    expose:
+      - '8000'
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - '80:80'
+      - '443:443'
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - app
+    env_file:
+      - .env.production
+
+volumes:
+  caddy_data:
+  caddy_config:
