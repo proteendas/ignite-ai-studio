@@ -86,6 +86,12 @@ To stop: `docker compose down` (add `-v` to also wipe the persisted volumes).
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
+
+```
+### Production mode
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
 ```
 
 This mounts your source tree into the container and runs `next dev` instead of a production
