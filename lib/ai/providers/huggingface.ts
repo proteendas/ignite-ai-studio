@@ -22,7 +22,9 @@ export function createHuggingFaceProvider(apiKeyOverride?: string): AIProvider {
     id: 'huggingface',
     apiKey,
     baseURL: 'https://router.huggingface.co/v1',
-    chatModel: process.env.HUGGINGFACE_CHAT_MODEL || DEFAULT_CHAT_MODEL,
+    // HUGGINGFACE_CHAT_MODEL is read by the shared discovery layer, which
+    // also queries the router for what this key can actually use.
+    fallbackChatModel: DEFAULT_CHAT_MODEL,
     // No embedModel: Hugging Face's router does not expose a standard
     // OpenAI-compatible embeddings endpoint across all models. Use
     // EMBEDDING_PROVIDER to route embeddings elsewhere if needed.

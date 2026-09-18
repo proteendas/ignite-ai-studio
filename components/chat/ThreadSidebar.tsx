@@ -180,7 +180,7 @@ export function ThreadSidebar({
                     className={clsx(
                       'group flex items-center gap-1 rounded-md px-2 py-1.5 transition-colors',
                       active
-                        ? 'bg-ignite/15 text-ignite-light shadow-glow-sm'
+                        ? 'nav-active text-ignite-light'
                         : 'text-content-muted hover:bg-surface-2 hover:text-content',
                       thread.pinned && !active && 'border-l-2 border-ignite'
                     )}

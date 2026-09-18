@@ -50,7 +50,7 @@ export function ModeToggle({
             className={clsx(
               'focus-ignite inline-flex items-center gap-1.5 rounded px-2.5 py-1 text-xs font-medium transition-colors',
               value === m.id
-                ? 'bg-ignite text-white shadow-glow-sm'
+                ? 'solid-active bg-ignite text-white shadow-glow-sm'
                 : 'text-content-muted hover:bg-surface-3 hover:text-content'
             )}
           >

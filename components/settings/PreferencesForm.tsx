@@ -145,7 +145,7 @@ export function PreferencesForm() {
                     key={ct.value}
                     className={`focus-ignite cursor-pointer rounded-md border p-3 transition-colors ${
                       selected
-                        ? 'border-ignite bg-ignite/15 shadow-glow-sm'
+                        ? 'card-active'
                         : 'border-surface-3 bg-surface-2 hover-glow'
                     }`}
                   >

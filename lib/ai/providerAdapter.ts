@@ -14,7 +14,14 @@ export type { ConnectionType };
 export interface ChatOptions {
   temperature?: number;
   maxTokens?: number;
+  /** Pin an exact model id. Wins over discovery. */
   model?: string;
+  /**
+   * Prefer the provider's cheap/fast tier. Used for internal calls
+   * (classification, summarisation) where the flagship model is wasted spend.
+   * The concrete id is discovered from the API key, not hardcoded.
+   */
+  light?: boolean;
 }
 
 export interface AIProvider {
@@ -109,7 +116,7 @@ function buildProvider(id: ProviderId, keys: ResolvedKeys): AIProvider {
       return createOpenAICompatibleProvider({
         id: 'openai',
         apiKey,
-        chatModel: 'gpt-4o-mini',
+        fallbackChatModel: 'gpt-4o-mini',
         embedModel: 'text-embedding-3-small',
       });
     case 'azure-openai':
@@ -119,7 +126,11 @@ function buildProvider(id: ProviderId, keys: ResolvedKeys): AIProvider {
         id: 'groq',
         apiKey,
         baseURL: 'https://api.groq.com/openai/v1',
-        chatModel: 'llama-3.3-70b-versatile',
+        // Groq retires model ids regularly; llama-3.3-70b-versatile was withdrawn.
+        // llama-3.1-8b-instant has been their longest-lived production model, but
+        // set GROQ_CHAT_MODEL if this one goes too — the error names the
+        // alternatives your key can use.
+        fallbackChatModel: 'llama-3.1-8b-instant',
         // Groq has no embeddings endpoint — embed() will throw if called.
       });
     case 'mistral':
@@ -127,7 +138,7 @@ function buildProvider(id: ProviderId, keys: ResolvedKeys): AIProvider {
         id: 'mistral',
         apiKey,
         baseURL: 'https://api.mistral.ai/v1',
-        chatModel: 'mistral-small-latest',
+        fallbackChatModel: 'mistral-small-latest',
         embedModel: 'mistral-embed',
       });
     case 'cerebras':
@@ -135,28 +146,28 @@ function buildProvider(id: ProviderId, keys: ResolvedKeys): AIProvider {
         id: 'cerebras',
         apiKey,
         baseURL: 'https://api.cerebras.ai/v1',
-        chatModel: 'llama3.1-8b',
+        fallbackChatModel: 'llama3.1-8b',
       });
     case 'openrouter':
       return createOpenAICompatibleProvider({
         id: 'openrouter',
         apiKey,
         baseURL: 'https://openrouter.ai/api/v1',
-        chatModel: 'meta-llama/llama-3.1-8b-instruct:free',
+        fallbackChatModel: 'meta-llama/llama-3.1-8b-instruct:free',
       });
     case 'together':
       return createOpenAICompatibleProvider({
         id: 'together',
         apiKey,
         baseURL: 'https://api.together.xyz/v1',
-        chatModel: 'meta-llama/Llama-3.2-3B-Instruct-Turbo',
+        fallbackChatModel: 'meta-llama/Llama-3.2-3B-Instruct-Turbo',
       });
     case 'github-models':
       return createOpenAICompatibleProvider({
         id: 'github-models',
         apiKey,
         baseURL: 'https://models.inference.ai.azure.com',
-        chatModel: 'gpt-4o-mini',
+        fallbackChatModel: 'gpt-4o-mini',
       });
     case 'gemini':
       return createGeminiProvider(apiKey);
@@ -356,32 +367,14 @@ function localModeProvider(): AIProvider {
 }
 
 /**
- * A cheaper/faster model per provider for small internal calls
- * (classification, query rewriting, summarization). Returns undefined when
- * the provider has no obvious light tier — callers should then use the
- * provider's default chat model.
+ * Options that route a call to the provider's cheap tier.
+ *
+ * This used to return a hardcoded model id per provider, which broke whenever a
+ * provider retired that id. The concrete model is now discovered from the API
+ * key (see lib/ai/modelDiscovery.ts); callers just say "use the light tier".
  */
-export function lightModelFor(id: string): string | undefined {
-  switch (id) {
-    case 'groq':
-      return 'llama-3.1-8b-instant';
-    case 'openai':
-      return 'gpt-4o-mini';
-    case 'gemini':
-      // Deliberately no override: Gemini free-tier quota is per model and
-      // varies by key, so pinning a "light" model here can hit a model with
-      // zero quota. The provider's own model-fallback chain (404/429-aware)
-      // picks the cheapest working model instead.
-      return undefined;
-    case 'mistral':
-      return 'mistral-small-latest';
-    case 'openrouter':
-      return 'meta-llama/llama-3.1-8b-instruct:free';
-    case 'ollama':
-      return process.env.OLLAMA_MODEL || 'llama3.2';
-    default:
-      return undefined;
-  }
+export function lightChatOptions(): ChatOptions {
+  return { light: true };
 }
 
 /**

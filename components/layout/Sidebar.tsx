@@ -76,7 +76,7 @@ export function Sidebar({ open, onClose }: SidebarProps) {
                 className={clsx(
                   'focus-ignite flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors',
                   active
-                    ? 'bg-ignite/15 text-ignite-light shadow-glow-sm'
+                    ? 'nav-active text-ignite-light'
                     : 'text-content-muted hover:bg-surface-2 hover:text-content'
                 )}
               >
@@ -98,7 +98,7 @@ export function Sidebar({ open, onClose }: SidebarProps) {
                   className={clsx(
                     'focus-ignite flex items-center gap-3 rounded-md px-3 py-1.5 text-xs font-medium transition-colors',
                     active
-                      ? 'bg-ignite/15 text-ignite-light'
+                      ? 'nav-active text-ignite-light'
                       : 'text-content-muted hover:bg-surface-2 hover:text-content'
                   )}
                 >

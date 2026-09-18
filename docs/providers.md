@@ -28,6 +28,34 @@ Most cloud providers speak the OpenAI-compatible protocol and share
 [`providers/openaiCompatible.ts`](../lib/ai/providers/openaiCompatible.ts). Gemini, Cohere,
 HuggingFace, Cloudflare and Ollama have their own modules.
 
+## How the model is chosen
+
+**Models are discovered from your API key, not hardcoded.** On first use the app
+calls the provider's `/models` endpoint, filters out anything that is not a chat
+completions model (embeddings, whisper, TTS, moderation, guard, rerank, image
+models), and ranks what is left — preferring instruction-tuned, larger and newer
+ids for general chat, and small/fast ones for internal calls like intent
+classification.
+
+This exists because model ids are not stable. Providers retire them on their own
+schedule — Groq withdrawing `llama-3.3-70b-versatile` is what prompted it — and a
+pinned default eventually 404s with no recovery short of editing code. Two keys
+for the same provider can also have access to different models.
+
+Resolution order:
+
+1. **`<PROVIDER>_CHAT_MODEL`** if set (`GROQ_CHAT_MODEL`, `OPENAI_CHAT_MODEL`, …).
+   An explicit choice always wins.
+2. **Discovery** from the key, cached for an hour per process. The TTL means a
+   newly released model is picked up without a redeploy.
+3. **A built-in fallback**, used only when the provider refuses to list models.
+
+If a request still hits a retired model, the cache is dropped and the error names
+both the env var to set *and* the models the key can actually use — so the fix is
+visible from the error alone.
+
+See [`lib/ai/modelDiscovery.ts`](../lib/ai/modelDiscovery.ts).
+
 ## How a provider is chosen
 
 1. **Resolve effective keys.** [`keyResolver.ts`](../lib/ai/keyResolver.ts) builds a map of

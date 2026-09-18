@@ -21,17 +21,24 @@ const globalForVector = globalThis as unknown as { [key: symbol]: Promise<void> 
  * Creates the extension, table and indexes once per process. Serialised behind
  * an advisory lock for the same reason the main schema is: several cold-start
  * instances can otherwise race on CREATE EXTENSION.
+ *
+ * Transaction-scoped lock inside one explicit transaction, because a
+ * session-level lock does not survive a transaction-mode connection pooler —
+ * see the long note on ensureSchema() in lib/db/sql/client.ts.
  */
 function ready(): Promise<void> {
   if (!globalForVector[READY_SYMBOL]) {
     globalForVector[READY_SYMBOL] = (async () => {
       const client = await getPool().connect();
       try {
-        await client.query('SELECT pg_advisory_lock($1)', [4_113_507_002]);
+        await client.query('BEGIN');
         try {
+          await client.query('SELECT pg_advisory_xact_lock($1)', [4_113_507_002]);
           await client.query(pgvectorSchemaSql(env.embeddingDimensions));
-        } finally {
-          await client.query('SELECT pg_advisory_unlock($1)', [4_113_507_002]);
+          await client.query('COMMIT');
+        } catch (err) {
+          await client.query('ROLLBACK').catch(() => undefined);
+          throw err;
         }
       } finally {
         client.release();

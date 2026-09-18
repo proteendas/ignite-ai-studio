@@ -1,7 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import { ChatMessage } from '@/lib/types';
 import type { AIProvider } from '@/lib/ai/providerAdapter';
-import { lightModelFor } from '@/lib/ai/providerAdapter';
+import { lightChatOptions } from '@/lib/ai/providerAdapter';
 import { buildHistorySummaryPrompt } from '@/lib/ai/prompts';
 import {
   createChatThread,
@@ -67,13 +67,12 @@ export async function getCompressedHistory(
       const transcript = older
         .map((m) => `${m.role === 'assistant' ? 'Assistant' : 'User'}: ${m.content}`)
         .join('\n');
-      const lightModel = lightModelFor(provider.id);
       const text = await provider.chat(
         [
           { role: 'system', content: buildHistorySummaryPrompt() },
           { role: 'user', content: transcript },
         ],
-        { temperature: 0, maxTokens: 200, ...(lightModel ? { model: lightModel } : {}) }
+        { temperature: 0, maxTokens: 200, ...lightChatOptions() }
       );
       if (text.trim()) {
         await upsertThreadSummary(threadId, text.trim(), boundary);

@@ -429,6 +429,8 @@ misconfiguration.
 | Function timeout during ingestion | Document too large for one invocation | Split the document, or upgrade the plan |
 | First request of the day is slow | Neon and Vercel cold starts | Expected on a free tier |
 | Stored API keys stopped working | `ENCRYPTION_KEY` changed | Restore the previous value |
+| App hangs on "Loading…", then works much later | A session-level advisory lock leaked on the pooler | Fixed in the app: schema bootstrap uses `pg_advisory_xact_lock` inside one transaction. If you see it on an old build, update. |
+| `model ... does not exist` | The provider retired that model id | Models are discovered from the key automatically; the error also lists what your key can use. Set `<PROVIDER>_CHAT_MODEL` to pin one. |
 | "Encryption is not configured" | `ENCRYPTION_KEY` missing or under 16 characters | Set it and redeploy |
 | 503 everywhere | `MAINTENANCE_MODE` still true | Remove it and redeploy |
 

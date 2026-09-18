@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth/config';
-import { resolveProvider, lightModelFor, type ChatOptions } from '@/lib/ai/providerAdapter';
+import { resolveProvider, lightChatOptions, type ChatOptions } from '@/lib/ai/providerAdapter';
 import {
   buildRagSystemPrompt,
   buildSqlAnswerPrompt,
@@ -197,8 +197,9 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: msg }, { status: 503 });
   }
 
-  const lightModel = lightModelFor(provider.id);
-  const lightOpts: ChatOptions | undefined = lightModel ? { model: lightModel } : undefined;
+  // Internal calls (intent classification, clarification checks) go to the
+  // provider's cheap tier; the concrete model is discovered from the API key.
+  const lightOpts: ChatOptions = lightChatOptions();
 
   // Must complete before history is read, or the thread row may not exist yet.
   await ensureThread(threadId, ownerId);

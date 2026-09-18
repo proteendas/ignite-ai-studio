@@ -149,6 +149,41 @@ body {
     margin: 0;
   }
 
+  /*
+   * Active state for navigation items, thread rows and selectable cards.
+   *
+   * Dark mode keeps the tinted fill plus red glow — it reads well against
+   * black. In light mode that same treatment becomes a washed-out pink block
+   * with a halo, so there the emphasis comes from a crisp red border and a
+   * much fainter tint instead, with no glow.
+   */
+  .nav-active {
+    background-color: rgb(var(--c-ignite) / 0.15);
+    box-shadow: 0 0 12px -3px rgba(237, 21, 21, 0.5);
+    border: 1px solid transparent;
+  }
+  html:not(.dark) .nav-active {
+    background-color: rgb(var(--c-ignite) / 0.06);
+    border-color: rgb(var(--c-ignite));
+    box-shadow: none;
+  }
+
+  /* Same idea for a selected card that already carries its own border. */
+  .card-active {
+    border-color: rgb(var(--c-ignite));
+    background-color: rgb(var(--c-ignite) / 0.15);
+    box-shadow: 0 0 12px -3px rgba(237, 21, 21, 0.5);
+  }
+  html:not(.dark) .card-active {
+    background-color: rgb(var(--c-ignite) / 0.06);
+    box-shadow: none;
+  }
+
+  /* Solid-red controls (mode toggle, primary buttons) only lose the halo. */
+  html:not(.dark) .solid-active {
+    box-shadow: none;
+  }
+
   /* Accessible focus ring in the ignite palette. */
   .focus-ignite:focus-visible {
     outline: 2px solid var(--ignite-red-light);

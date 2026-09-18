@@ -60,20 +60,41 @@ export function getPool(): Pool {
  * warm container await the same in-flight promise rather than each running the
  * DDL. Across *separate* instances (a serverless cold-start storm) concurrent
  * `CREATE TABLE IF NOT EXISTS` can still race and raise a duplicate-object
- * error, so the whole thing runs inside a Postgres advisory lock: the first
- * instance applies the schema, the rest wait and then find it already there.
+ * error, so the work is serialised behind a Postgres advisory lock.
+ *
+ * The lock is transaction-scoped (`pg_advisory_xact_lock`) and the whole
+ * bootstrap runs inside one explicit transaction. That is not a stylistic
+ * choice — it is required to work behind a connection pooler.
+ *
+ * A *session*-level `pg_advisory_lock` is broken here. Managed Postgres
+ * poolers (Neon's `-pooler` endpoint, PgBouncer, Supabase's pooler) run in
+ * TRANSACTION pooling mode, where a server connection is assigned to a client
+ * only for the duration of a transaction. Statements issued outside an explicit
+ * transaction can therefore each land on a *different* backend: the lock is
+ * taken on one, and the unlock runs on another and silently returns false. The
+ * lock is then held forever by a backend that has gone back into the pool, and
+ * every subsequent cold start blocks on it indefinitely — the request hangs
+ * rather than failing, so it presents as the app never finishing loading.
+ *
+ * Wrapping everything in one transaction pins a single backend for its whole
+ * duration, and an xact lock is released automatically at COMMIT or ROLLBACK,
+ * so it cannot leak even if the DDL throws.
  */
 async function ensureSchema(): Promise<void> {
   const pool = getPool();
   const client = await pool.connect();
   try {
-    await client.query('SELECT pg_advisory_lock($1)', [BOOTSTRAP_LOCK_ID]);
+    await client.query('BEGIN');
     try {
+      // Blocks until any concurrent bootstrap commits; released at COMMIT/ROLLBACK.
+      await client.query('SELECT pg_advisory_xact_lock($1)', [BOOTSTRAP_LOCK_ID]);
       await client.query(SCHEMA_SQL);
       await migrateExistingTables(client);
       await seedDemoDataIfEmpty(client);
-    } finally {
-      await client.query('SELECT pg_advisory_unlock($1)', [BOOTSTRAP_LOCK_ID]);
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => undefined);
+      throw err;
     }
   } finally {
     client.release();
