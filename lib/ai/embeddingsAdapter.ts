@@ -138,20 +138,20 @@ export function createOllamaEmbeddings(): EmbeddingsProvider {
  * key at all. 'auto' keeps the cloud default (gemini) unless
  * EMBEDDINGS_PROVIDER=ollama is set explicitly.
  */
-export function resolveEmbeddingsProvider(userId?: string): EmbeddingsProvider {
+export async function resolveEmbeddingsProvider(userId?: string): Promise<EmbeddingsProvider> {
   const explicit = (process.env.EMBEDDINGS_PROVIDER || '').trim().toLowerCase();
 
   if (explicit === 'ollama') {
     return createOllamaEmbeddings();
   }
-  if (!explicit && resolveConnectionType(userId) === 'local') {
+  if (!explicit && (await resolveConnectionType(userId)) === 'local') {
     return createOllamaEmbeddings();
   }
 
   const selected = explicit || 'gemini';
 
   if (selected === 'huggingface') {
-    const key = resolveKeyForProvider('huggingface', userId);
+    const key = await resolveKeyForProvider('huggingface', userId);
     if (!key) {
       throw new Error(
         'EMBEDDINGS_PROVIDER=huggingface but no HuggingFace key is configured. Add ' +
@@ -162,11 +162,11 @@ export function resolveEmbeddingsProvider(userId?: string): EmbeddingsProvider {
   }
 
   // default: gemini
-  const geminiKey = resolveKeyForProvider('gemini', userId);
+  const geminiKey = await resolveKeyForProvider('gemini', userId);
   if (geminiKey) return createGeminiEmbeddings(geminiKey);
 
   // If Gemini isn't configured but HuggingFace is, fall back automatically.
-  const hfKey = resolveKeyForProvider('huggingface', userId);
+  const hfKey = await resolveKeyForProvider('huggingface', userId);
   if (hfKey) return createHuggingFaceEmbeddings(hfKey);
 
   throw new Error(
@@ -192,12 +192,12 @@ function sha256Hex(text: string): string {
 export async function embedTexts(texts: string[], userId?: string): Promise<number[][]> {
   if (texts.length === 0) return [];
 
-  const provider = resolveEmbeddingsProvider(userId);
+  const provider = await resolveEmbeddingsProvider(userId);
   const hashes = texts.map(sha256Hex);
 
   let cached = new Map<string, number[]>();
   try {
-    cached = getCachedEmbeddings([...new Set(hashes)], provider.id, provider.model);
+    cached = await getCachedEmbeddings([...new Set(hashes)], provider.id, provider.model);
   } catch {
     // A cache read failure must never block embedding — fall through and
     // embed everything.
@@ -227,7 +227,7 @@ export async function embedTexts(texts: string[], userId?: string): Promise<numb
     const fresh = new Map<string, number[]>();
     misses.forEach((m, i) => fresh.set(m.hash, vectors[i]));
     try {
-      putCachedEmbeddings(
+      await putCachedEmbeddings(
         misses.map((m, i) => ({ hash: m.hash, vector: vectors[i] })),
         provider.id,
         provider.model
@@ -245,9 +245,11 @@ export async function embedTexts(texts: string[], userId?: string): Promise<numb
 }
 
 /** Which embeddings provider id is active (for status display); null if none configured. */
-export function activeEmbeddingsProviderId(userId?: string): EmbeddingsProviderId | null {
+export async function activeEmbeddingsProviderId(
+  userId?: string
+): Promise<EmbeddingsProviderId | null> {
   try {
-    return resolveEmbeddingsProvider(userId).id;
+    return (await resolveEmbeddingsProvider(userId)).id;
   } catch {
     return null;
   }

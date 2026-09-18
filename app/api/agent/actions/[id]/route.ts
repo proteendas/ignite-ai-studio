@@ -14,6 +14,10 @@ import {
 } from '@/lib/ai/agent/loop';
 
 export const runtime = 'nodejs';
+// Approving an action resumes the paused ReAct loop.
+// Vercel caps serverless functions at 10s by default (60s on Hobby without this,
+// 300s on Pro); other platforms ignore it.
+export const maxDuration = 300;
 
 interface DecisionBody {
   decision?: unknown;
@@ -34,7 +38,7 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
   }
   const ownerId = session.user.id;
 
-  const rl = checkRateLimit(`agent:${ownerId}`, { limit: 10, windowMs: 60_000 });
+  const rl = await checkRateLimit(`agent:${ownerId}`, { limit: 10, windowMs: 60_000 });
   if (!rl.allowed) {
     return NextResponse.json({ error: 'Rate limit exceeded, try again shortly.' }, { status: 429 });
   }
@@ -51,7 +55,7 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
     return NextResponse.json({ error: 'decision must be "approve" or "reject".' }, { status: 400 });
   }
 
-  const action = getAgentAction(params.id);
+  const action = await getAgentAction(params.id);
   if (!action) {
     return NextResponse.json({ error: 'Action not found.' }, { status: 404 });
   }
@@ -90,15 +94,15 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
 
   let provider;
   try {
-    provider = resolveProvider(ownerId);
+    provider = await resolveProvider(ownerId);
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'No AI provider configured.';
     return NextResponse.json({ error: msg }, { status: 503 });
   }
 
   if (decision === 'reject') {
-    updateAgentAction(action.id, { status: 'rejected', decided: true });
-    recordActivity({
+    await updateAgentAction(action.id, { status: 'rejected', decided: true });
+    await recordActivity({
       id: uuidv4(),
       ownerId,
       type: 'agent',
@@ -125,11 +129,11 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
         return NextResponse.json({ error: `Edited payload is invalid: ${issues}` }, { status: 400 });
       }
       input = validation.data;
-      updateAgentAction(action.id, { payloadJson: JSON.stringify(input) });
+      await updateAgentAction(action.id, { payloadJson: JSON.stringify(input) });
     }
 
-    updateAgentAction(action.id, { status: 'approved', decided: true });
-    recordActivity({
+    await updateAgentAction(action.id, { status: 'approved', decided: true });
+    await recordActivity({
       id: uuidv4(),
       ownerId,
       type: 'agent',

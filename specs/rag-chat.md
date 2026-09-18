@@ -32,4 +32,5 @@
 - Empty retrieval → model must answer "I don't have that information in the provided documents."
 
 ## Status / lessons
-- Prior bug: chromadb@1.9.2 (v1 API) vs `chromadb/chroma:latest` (v1 removed) → `410 Gone`. Fixed by pinning server to `chromadb/chroma:0.5.23`. See [lessons-learned.md](./lessons-learned.md) L2.
+- **Upgrade 3:** the default vector store is now **pgvector**, in the same Postgres database as the application tables (`document_chunks`, HNSW index, cosine distance). Chroma remains selectable via `VECTOR_DB_PROVIDER=chroma`.
+- Prior bug (Chroma only): chromadb@1.9.2 (v1 API) vs `chromadb/chroma:latest` (v1 removed) → `410 Gone`. Fixed by pinning server to `chromadb/chroma:0.5.23`. See [lessons-learned.md](./lessons-learned.md) L2.

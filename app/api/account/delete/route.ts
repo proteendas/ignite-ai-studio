@@ -14,7 +14,7 @@ export async function POST() {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
-  deleteUserData(session.user.id);
+  await deleteUserData(session.user.id);
 
   return NextResponse.json({ ok: true });
 }

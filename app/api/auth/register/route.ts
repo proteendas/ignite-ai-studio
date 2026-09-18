@@ -30,7 +30,7 @@ export async function POST(req: NextRequest) {
 
     const { email, password, name } = parsed.data;
 
-    const existing = getUserByEmail(email);
+    const existing = await getUserByEmail(email);
     if (existing) {
       return NextResponse.json(
         { error: 'A user with this email already exists' },
@@ -39,7 +39,7 @@ export async function POST(req: NextRequest) {
     }
 
     const passwordHash = await hashPassword(password);
-    const user = createUser({
+    const user = await createUser({
       id: uuidv4(),
       email,
       passwordHash,

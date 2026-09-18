@@ -17,6 +17,10 @@ import { checkRateLimit } from '@/lib/rateLimit';
 import { VectorChunk } from '@/lib/types';
 
 export const runtime = 'nodejs';
+// Ingestion parses, chunks and embeds a whole document inline.
+// Vercel caps serverless functions at 10s by default (60s on Hobby without this,
+// 300s on Pro); other platforms ignore it.
+export const maxDuration = 300;
 
 export async function POST(req: NextRequest) {
   const session = await getServerSession(authOptions);
@@ -25,7 +29,7 @@ export async function POST(req: NextRequest) {
   }
   const ownerId = session.user.id;
 
-  const rl = checkRateLimit(`ingest:${ownerId}`, { limit: 10, windowMs: 60_000 });
+  const rl = await checkRateLimit(`ingest:${ownerId}`, { limit: 10, windowMs: 60_000 });
   if (!rl.allowed) {
     return NextResponse.json({ error: 'Rate limit exceeded, try again shortly.' }, { status: 429 });
   }
@@ -43,7 +47,7 @@ export async function POST(req: NextRequest) {
   }
 
   const documentId = uuidv4();
-  insertDocument({
+  await insertDocument({
     id: documentId,
     ownerId,
     filename: file.name,
@@ -59,7 +63,7 @@ export async function POST(req: NextRequest) {
     const text = await parseDocument(buffer, file.type, file.name);
 
     if (!text || !text.trim()) {
-      updateDocumentStatus(documentId, 'failed', 0, 'No extractable text found in document.');
+      await updateDocumentStatus(documentId, 'failed', 0, 'No extractable text found in document.');
       return NextResponse.json(
         { error: 'No extractable text found in document.', documentId },
         { status: 422 }
@@ -68,7 +72,7 @@ export async function POST(req: NextRequest) {
 
     const chunks = chunkText(text);
     if (chunks.length === 0) {
-      updateDocumentStatus(documentId, 'failed', 0, 'Document produced no chunks after processing.');
+      await updateDocumentStatus(documentId, 'failed', 0, 'Document produced no chunks after processing.');
       return NextResponse.json(
         { error: 'Document produced no chunks after processing.', documentId },
         { status: 422 }
@@ -89,18 +93,18 @@ export async function POST(req: NextRequest) {
     const vectorStore = getVectorStore();
     await vectorStore.upsert(vectorChunks, embeddings);
 
-    updateDocumentStatus(documentId, 'ready', chunks.length);
+    await updateDocumentStatus(documentId, 'ready', chunks.length);
 
     // Track embedding usage (token estimate) + activity for the dashboard.
     const embedTokenEstimate = Math.ceil(chunks.join(' ').length / 4);
-    recordUsage({
+    await recordUsage({
       id: uuidv4(),
       ownerId,
-      provider: activeEmbeddingsProviderId(ownerId) ?? 'unknown',
+      provider: (await activeEmbeddingsProviderId(ownerId)) ?? 'unknown',
       kind: 'embed',
       promptTokens: embedTokenEstimate,
     });
-    recordActivity({
+    await recordActivity({
       id: uuidv4(),
       ownerId,
       type: 'upload',
@@ -116,7 +120,7 @@ export async function POST(req: NextRequest) {
   } catch (err) {
     console.error('Ingest failed:', err);
     const message = err instanceof Error ? err.message : 'Unknown ingest error';
-    updateDocumentStatus(documentId, 'failed', 0, message);
+    await updateDocumentStatus(documentId, 'failed', 0, message);
     return NextResponse.json({ error: `Ingestion failed: ${message}`, documentId }, { status: 500 });
   }
 }

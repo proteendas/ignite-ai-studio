@@ -1,22 +1,43 @@
 # Data model
 
-The relational schema lives in [`lib/db/sql/schema.sql`](../lib/db/sql/schema.sql); all access
+Everything lives in **one Postgres database** — application tables and vector embeddings alike.
+The schema is a string constant in [`lib/db/sql/schema.ts`](../lib/db/sql/schema.ts); all access
 goes through [`lib/db/sql/client.ts`](../lib/db/sql/client.ts).
 
 ## How the schema is applied
 
-`schema.sql` uses `CREATE TABLE IF NOT EXISTS` throughout and is executed on **every** startup,
-so it is safe to re-run. Because that cannot add a column to a table that already exists,
-columns introduced after the initial release are back-filled by `migrateExistingTables()`,
-guarded by `PRAGMA table_info` so it is idempotent.
+The DDL is inlined in TypeScript rather than kept in a `.sql` file: serverless bundlers do not
+reliably ship loose non-JS assets beside the compiled handler, and there is no dependable
+`__dirname` at runtime.
 
-> **Adding a column means editing two places:** the `CREATE TABLE` in `schema.sql` (for fresh
-> databases) *and* an `ensureColumn(...)` call in `migrateExistingTables()` (for existing ones).
-> Miss the second and deployed databases silently lack the column.
+It is applied lazily on the first query a process makes, behind a memoised promise on
+`globalThis` (so concurrent callers in one container share a single run) and a Postgres
+**advisory lock** (so several cold-starting instances cannot race on `CREATE TABLE IF NOT
+EXISTS`). If bootstrap fails the promise is cleared, so the next request retries instead of the
+container staying permanently broken.
 
-SQLite runs with `journal_mode = WAL` and `foreign_keys = ON`. The connection is a singleton
-stashed on `globalThis` under a symbol, so Next.js hot reload does not reopen the file or
-re-seed on every edit.
+Everything in it is idempotent — `CREATE TABLE IF NOT EXISTS`, `CREATE INDEX IF NOT EXISTS`, and
+`ALTER TABLE … ADD COLUMN IF NOT EXISTS` in `migrateExistingTables()`.
+
+> **Adding a column means editing two places:** the `CREATE TABLE` in `schema.ts` (for fresh
+> databases) *and* an `ALTER TABLE … ADD COLUMN IF NOT EXISTS` in `migrateExistingTables()` (for
+> existing ones). Miss the second and deployed databases silently lack the column.
+
+The connection pool is likewise memoised on `globalThis`, so Next.js hot reload does not open a
+new pool on every edit and warm serverless containers reuse theirs.
+
+## Driver type coercion
+
+`node-postgres` returns some column types as JavaScript values you would not expect:
+
+| Postgres type | Comes back as | Handled by |
+| --- | --- | --- |
+| `TIMESTAMPTZ`, `DATE` | `Date` object | `toIso()` → ISO string |
+| `BIGINT`, and `SUM()` over an integer | **string** (to avoid precision loss) | `toNum()` |
+| `BOOLEAN` | real `true`/`false` (not `0`/`1` as in SQLite) | direct |
+
+Every mapper funnels through these, so driver types never leak into the application's record
+types — which are all plain strings, numbers and booleans.
 
 ## Ownership and isolation
 
@@ -50,9 +71,20 @@ Indexed on `owner_id`.
 provider and model. Changing embeddings provider or model produces different keys, so old
 entries are simply never hit again.
 
-> Chunk **vectors** live in Chroma, not SQLite. SQLite holds document metadata and the cache;
-> the vector store holds the embeddings. Deleting a document must clear both — `DELETE
-> /api/documents/[id]` does.
+**`document_chunks`** *(pgvector only)* — `id` (PK), `owner_id`, `document_id`, `filename`,
+`chunk_index`, `content`, `embedding VECTOR(n)`.
+
+This is the vector store. It is created separately from the main schema, because
+`CREATE EXTENSION vector` needs privileges a managed role may lack and a Chroma-backed
+deployment should not fail to boot over an extension it never uses.
+
+Indexes: an HNSW index on `embedding` using `vector_cosine_ops` for similarity search, plus a
+btree on `(owner_id, document_id)` for scoped lookups and deletion.
+
+> **`VECTOR(n)` is fixed when the table is created** and must match the embeddings model's output
+> width (`EMBEDDING_DIMENSIONS`; 768 for Gemini, 384 for all-MiniLM-L6-v2, 1536 for OpenAI
+> text-embedding-3-small). A mismatch fails loudly on insert with a message naming both numbers.
+> To change it: `DROP TABLE document_chunks;` and re-ingest.
 
 ### Conversations
 
@@ -107,7 +139,17 @@ name → true; read-only tools only, off by default).
 **`activity_events`** — `id`, `owner_id`, `type` (`upload` | `chat` | `generate` | `delete` | …),
 `summary`, `created_at`.
 
-> These grow without bound. There is no retention job; on a long-lived deployment, prune them.
+> These grow without bound. There is no retention job; on a long-lived deployment, prune them —
+> especially on Neon's 0.5 GB free tier.
+
+### Rate limiting
+
+**`rate_limits`** — `bucket_key` (PK), `hits`, `window_start`.
+
+One row per limiter bucket. `consumeRateLimit()` increments it in a **single atomic upsert** that
+either starts a fresh window (when the stored one has aged out) or increments the current one, so
+concurrent requests landing in different processes cannot both read a stale count and both be
+allowed.
 
 ### Demo data
 
@@ -116,16 +158,39 @@ programmatically by `seedDemoDataIfEmpty()` only when `products` is empty, not f
 
 ## Vector store
 
-Chunks are stored in Chroma, one record per chunk, tagged with the owning user and document so
-similarity search can be filtered to the requester's own documents. The store sits behind the
-`VectorStore` interface in [`lib/db/vector/`](../lib/db/vector/); `getVectorStore()` picks the
-implementation from `VECTOR_DB_PROVIDER`. FAISS and Azure AI Search are documented stubs.
+The store sits behind the `VectorStore` interface in [`lib/db/vector/`](../lib/db/vector/);
+`getVectorStore()` picks the implementation from `VECTOR_DB_PROVIDER`.
+
+| Provider | Status | Notes |
+| --- | --- | --- |
+| `pgvector` | **Default, fully wired** | Embeddings in the same Postgres database. Works on serverless. |
+| `chroma` | Fully wired | Separate long-running service. Self-hosted only. |
+| `faiss` | Stub | Documented placeholder |
+| `azure-ai-search` | Stub | Documented placeholder |
+
+Every chunk is tagged with its owning user, and similarity search filters on `owner_id` — that
+filter is the isolation boundary between accounts.
+
+Search uses cosine distance:
+
+```sql
+SELECT …, 1 - (embedding <=> $1::vector) AS score
+FROM document_chunks
+WHERE owner_id = $2
+ORDER BY embedding <=> $1::vector
+LIMIT $3;
+```
+
+`<=>` returns **distance** (0 = identical), so similarity is `1 - distance`.
 
 ## Account deletion
 
-`deleteUserData(ownerId)` runs one transaction that deletes thread-keyed rows first (messages,
-summaries), then every `owner_id`-keyed table, then the user row. It is called by
-`POST /api/account/delete`.
+`deleteUserData(ownerId)` runs one transaction that deletes thread-keyed rows first (messages and
+summaries, via a subquery over the owner's threads), then every `owner_id`-keyed table, then the
+user row. It is called by `POST /api/account/delete`.
+
+Document chunks are removed separately, when each document is deleted, through
+`vectorStore.deleteDocument()`.
 
 **When you add an owner-scoped table, add it to that list too** — otherwise deletion silently
 leaves orphaned rows behind.

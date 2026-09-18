@@ -8,26 +8,48 @@ services:
     env_file:
       - .env
     environment:
+      # Overrides whatever .env says, so the container always talks to the
+      # compose-managed Postgres rather than a host-local one.
+      - DATABASE_URL=postgres://igniteai:igniteai@postgres:5432/igniteai?sslmode=disable
+      - VECTOR_DB_PROVIDER=${VECTOR_DB_PROVIDER:-pgvector}
       - CHROMA_URL=http://chroma:8000
-      - SQLITE_PATH=/app/data/app.db
-    volumes:
-      - sqlite-data:/app/data
     # Lets the container reach an Ollama server running on the Docker host
     # (set OLLAMA_BASE_URL=http://host.docker.internal:11434 in .env).
     extra_hosts:
       - 'host.docker.internal:host-gateway'
     depends_on:
-      chroma:
-        condition: service_started
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
 
+  postgres:
+    # pgvector/pgvector ships stock Postgres with the vector extension already
+    # compiled in, so `CREATE EXTENSION vector` works without a custom build.
+    image: pgvector/pgvector:pg16
+    environment:
+      - POSTGRES_USER=igniteai
+      - POSTGRES_PASSWORD=igniteai
+      - POSTGRES_DB=igniteai
+    ports:
+      - '${POSTGRES_PORT:-5432}:5432'
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      # The app applies its schema on first query, so it must not start until
+      # Postgres is genuinely accepting connections — not merely running.
+      test: ['CMD-SHELL', 'pg_isready -U igniteai -d igniteai']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  # Optional: only needed with VECTOR_DB_PROVIDER=chroma. pgvector is the
+  # default and keeps vectors in Postgres, so most deployments can ignore this.
   chroma:
     # Pinned to a v1-API-compatible release. The chromadb@1.9.2 npm client
-    # talks to Chroma's /api/v1 endpoints, which were removed in Chroma 0.6.0+
-    # (the :latest image returns "410 Gone" for /api/v1). Do not bump this to
-    # :latest without also upgrading the chromadb client to a v2-compatible
-    # version and adjusting lib/db/vector/chroma.ts.
+    # talks to Chroma's /api/v1 endpoints, which were removed in Chroma 0.6.0+.
     image: chromadb/chroma:0.5.23
+    profiles: ['chroma']
     ports:
       - '${CHROMA_PORT:-8000}:8000'
     volumes:
@@ -35,5 +57,5 @@ services:
     restart: unless-stopped
 
 volumes:
-  sqlite-data:
+  postgres-data:
   chroma-data:

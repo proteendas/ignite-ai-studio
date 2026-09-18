@@ -24,7 +24,7 @@ export async function GET() {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
-  const items = listGeneratedContent(session.user.id);
+  const items = await listGeneratedContent(session.user.id);
   return NextResponse.json({ items });
 }
 
@@ -51,7 +51,7 @@ export async function POST(req: NextRequest) {
   }
 
   const id = uuidv4();
-  saveGeneratedContent({
+  await saveGeneratedContent({
     id,
     ownerId,
     documentId: documentId ?? null,

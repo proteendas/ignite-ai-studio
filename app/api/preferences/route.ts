@@ -13,7 +13,7 @@ export async function GET() {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
-  return NextResponse.json({ preferences: getUserPreferences(session.user.id) });
+  return NextResponse.json({ preferences: await getUserPreferences(session.user.id) });
 }
 
 type PreferencesPatch = Partial<Omit<UserPreferences, 'ownerId'>>;
@@ -71,6 +71,6 @@ export async function PUT(req: NextRequest) {
     patch.autoApprove = aa as Record<string, boolean>;
   }
 
-  const preferences = upsertUserPreferences(session.user.id, patch);
+  const preferences = await upsertUserPreferences(session.user.id, patch);
   return NextResponse.json({ preferences });
 }

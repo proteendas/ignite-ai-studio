@@ -7,8 +7,8 @@ const ALLOWED_TABLES: Record<string, string[]> = {
 };
 
 const SCHEMA_DESCRIPTION = `
-Table products(id INTEGER, name TEXT, category TEXT, price REAL, stock INTEGER)
-Table orders(id INTEGER, product_id INTEGER REFERENCES products(id), customer_name TEXT, quantity INTEGER, order_date TEXT, status TEXT)
+Table products(id INTEGER, name TEXT, category TEXT, price DOUBLE PRECISION, stock INTEGER)
+Table orders(id INTEGER, product_id INTEGER REFERENCES products(id), customer_name TEXT, quantity INTEGER, order_date DATE, status TEXT)
 `.trim();
 
 export interface NlToSqlResult {
@@ -20,7 +20,7 @@ export interface NlToSqlResult {
  * Guards against anything that isn't a single, read-only SELECT against the
  * allow-listed demo tables/columns. Rejects multiple statements, DML/DDL
  * keywords, and any table not in ALLOWED_TABLES. This is a defense-in-depth
- * layer on top of runReadOnlyQuery()'s use of `.prepare().all()`, which
+ * layer on top of runReadOnlyQuery(), which wraps the statement in a
  * already blocks multi-statement execution at the driver level.
  */
 export function validateReadOnlySql(sql: string): { ok: true } | { ok: false; error: string } {
@@ -30,7 +30,7 @@ export function validateReadOnlySql(sql: string): { ok: true } | { ok: false; er
     return { ok: false, error: 'Only SELECT statements are permitted.' };
   }
 
-  const forbiddenPattern = /\b(insert|update|delete|drop|alter|create|attach|detach|pragma|replace|vacuum)\b/i;
+  const forbiddenPattern = /\b(insert|update|delete|drop|alter|create|truncate|grant|revoke|copy|call|do|vacuum|set)\b/i;
   if (forbiddenPattern.test(trimmed)) {
     return { ok: false, error: 'Query contains a forbidden keyword.' };
   }
@@ -67,7 +67,7 @@ export async function translateAndRunNlToSql(
   question: string
 ): Promise<NlToSqlResult> {
   const systemPrompt = [
-    'You translate natural-language questions into a single read-only SQLite SELECT statement ' +
+    'You translate natural-language questions into a single read-only PostgreSQL SELECT statement ' +
       'against the following schema. Only use these tables and columns — never invent columns ' +
       'or tables.',
     SCHEMA_DESCRIPTION,
@@ -96,7 +96,7 @@ export async function translateAndRunNlToSql(
   }
 
   const finalSql = ensureLimit(cleanedSql);
-  const rows = runReadOnlyQuery(finalSql);
+  const rows = await runReadOnlyQuery(finalSql);
 
   return { sql: finalSql, rows };
 }

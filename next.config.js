@@ -2,7 +2,10 @@
 const nextConfig = {
   output: 'standalone',
   experimental: {
-    serverComponentsExternalPackages: ['better-sqlite3', 'chromadb', 'pdf-parse', 'mammoth'],
+    // `pg` is listed so Next does not try to bundle its optional native
+    // accelerator (pg-native); the rest carry dynamic requires that webpack
+    // cannot statically resolve.
+    serverComponentsExternalPackages: ['pg', 'chromadb', 'pdf-parse', 'mammoth'],
   },
 };
 

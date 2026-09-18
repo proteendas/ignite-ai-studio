@@ -29,6 +29,10 @@ import { v4 as uuidv4 } from 'uuid';
 import { ChatMessage, ChatMode, Citation, Tone } from '@/lib/types';
 
 export const runtime = 'nodejs';
+// Streams a model response, which can outlast the default limit.
+// Vercel caps serverless functions at 10s by default (60s on Hobby without this,
+// 300s on Pro); other platforms ignore it.
+export const maxDuration = 120;
 
 interface ChatRequestBody {
   message: string;
@@ -102,7 +106,7 @@ async function handleDocumentRoute(
 }
 
 async function handleStructuredDataRoute(
-  provider: ReturnType<typeof resolveProvider>,
+  provider: Awaited<ReturnType<typeof resolveProvider>>,
   question: string,
   tone: Tone,
   history: ChatMessage[]
@@ -128,7 +132,7 @@ export async function POST(req: NextRequest) {
   }
   const ownerId = session.user.id;
 
-  const rl = checkRateLimit(`chat:${ownerId}`, { limit: 30, windowMs: 60_000 });
+  const rl = await checkRateLimit(`chat:${ownerId}`, { limit: 30, windowMs: 60_000 });
   if (!rl.allowed) {
     return NextResponse.json({ error: 'Rate limit exceeded, try again shortly.' }, { status: 429 });
   }
@@ -159,7 +163,7 @@ export async function POST(req: NextRequest) {
 
   if (mode === 'grounded') {
     if (documentId) {
-      const doc = getDocumentById(documentId);
+      const doc = await getDocumentById(documentId);
       if (!doc || doc.ownerId !== ownerId) {
         return NextResponse.json({ error: 'Document not found.' }, { status: 404 });
       }
@@ -172,7 +176,7 @@ export async function POST(req: NextRequest) {
         );
       }
     } else {
-      const hasReadyDoc = listDocumentsByOwner(ownerId).some((d) => d.status === 'ready');
+      const hasReadyDoc = (await listDocumentsByOwner(ownerId)).some((d) => d.status === 'ready');
       if (!hasReadyDoc) {
         return NextResponse.json(
           {
@@ -187,7 +191,7 @@ export async function POST(req: NextRequest) {
 
   let provider;
   try {
-    provider = resolveProvider(ownerId);
+    provider = await resolveProvider(ownerId);
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'No AI provider configured.';
     return NextResponse.json({ error: msg }, { status: 503 });
@@ -312,7 +316,7 @@ export async function POST(req: NextRequest) {
           finalMessages.reduce((n, m) => n + m.content.length, 0) / 4
         );
         const completionTokens = estimateTokens(fullText);
-        recordUsage({
+        await recordUsage({
           id: uuidv4(),
           ownerId,
           provider: provider.id,
@@ -320,14 +324,14 @@ export async function POST(req: NextRequest) {
           promptTokens,
           completionTokens,
         });
-        recordRequestLog({
+        await recordRequestLog({
           id: uuidv4(),
           ownerId,
           route: '/api/chat',
           status: 200,
           provider: provider.id,
         });
-        recordActivity({ id: uuidv4(), ownerId, type: 'chat', summary: `Asked: "${message.slice(0, 60)}"` });
+        await recordActivity({ id: uuidv4(), ownerId, type: 'chat', summary: `Asked: "${message.slice(0, 60)}"` });
 
         controller.enqueue(sseEvent('done', { promptTokens, completionTokens }));
         controller.close();

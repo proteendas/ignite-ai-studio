@@ -14,13 +14,13 @@ export async function DELETE(_req: NextRequest, { params }: { params: { service:
   const ownerId = session.user.id;
   const service = params.service;
 
-  const existing = getUserConnection(ownerId, service);
+  const existing = await getUserConnection(ownerId, service);
   if (!existing) {
     return NextResponse.json({ error: 'Connection not found.' }, { status: 404 });
   }
 
-  deleteUserConnection(ownerId, service);
-  recordActivity({
+  await deleteUserConnection(ownerId, service);
+  await recordActivity({
     id: uuidv4(),
     ownerId,
     type: 'connection',

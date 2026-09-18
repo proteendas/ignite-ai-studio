@@ -10,6 +10,10 @@ import { checkRateLimit } from '@/lib/rateLimit';
 import { ContentType, Tone, Channel } from '@/lib/types';
 
 export const runtime = 'nodejs';
+// Batch generation produces one variant per channel.
+// Vercel caps serverless functions at 10s by default (60s on Hobby without this,
+// 300s on Pro); other platforms ignore it.
+export const maxDuration = 300;
 
 interface GenerateContentBody {
   documentId?: string;
@@ -60,7 +64,7 @@ export async function POST(req: NextRequest) {
   }
   const ownerId = session.user.id;
 
-  const rl = checkRateLimit(`generate-content:${ownerId}`, { limit: 15, windowMs: 60_000 });
+  const rl = await checkRateLimit(`generate-content:${ownerId}`, { limit: 15, windowMs: 60_000 });
   if (!rl.allowed) {
     return NextResponse.json({ error: 'Rate limit exceeded, try again shortly.' }, { status: 429 });
   }
@@ -100,7 +104,7 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const doc = getDocumentById(documentId);
+  const doc = await getDocumentById(documentId);
   if (!doc || doc.ownerId !== ownerId) {
     return NextResponse.json({ error: 'Document not found.' }, { status: 404 });
   }
@@ -110,7 +114,7 @@ export async function POST(req: NextRequest) {
 
   let provider;
   try {
-    provider = resolveProvider(ownerId);
+    provider = await resolveProvider(ownerId);
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'No AI provider configured.';
     return NextResponse.json({ error: msg }, { status: 503 });
@@ -163,7 +167,7 @@ export async function POST(req: NextRequest) {
 
       // Record usage + activity per channel so batch generations are fully
       // accounted for in the dashboard.
-      recordUsage({
+      await recordUsage({
         id: uuidv4(),
         ownerId,
         provider: provider.id,
@@ -171,7 +175,7 @@ export async function POST(req: NextRequest) {
         promptTokens: Math.ceil((systemPrompt.length + userPrompt.length) / 4),
         completionTokens: Math.ceil(output.length / 4),
       });
-      recordActivity({
+      await recordActivity({
         id: uuidv4(),
         ownerId,
         type: 'generate',

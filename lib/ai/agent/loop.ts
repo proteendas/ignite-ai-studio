@@ -201,7 +201,7 @@ export async function executeToolForAction(
       summary: `Tool ${tool.name} threw an error: ${err instanceof Error ? err.message : String(err)}`,
     };
   }
-  updateAgentAction(actionId, {
+  await updateAgentAction(actionId, {
     status: result.ok ? 'executed' : 'failed',
     resultJson: JSON.stringify(result),
   });
@@ -226,7 +226,7 @@ export async function* runAgentLoop(opts: {
   state: AgentLoopState;
 }): AsyncGenerator<AgentLoopEvent, void, unknown> {
   const { provider, ownerId, threadId, state } = opts;
-  const preferences = getUserPreferences(ownerId);
+  const preferences = await getUserPreferences(ownerId);
   let consecutiveParseFailures = 0;
 
   while (state.step < MAX_STEPS) {
@@ -290,7 +290,7 @@ export async function* runAgentLoop(opts: {
     const input = validation.data as Record<string, unknown>;
     const summary = summarizeAction(tool.name, input);
     const actionId = uuidv4();
-    const record = insertAgentAction({
+    const record = await insertAgentAction({
       id: actionId,
       threadId,
       ownerId,
@@ -314,7 +314,7 @@ export async function* runAgentLoop(opts: {
       return; // Pause; the decision route resumes from stateJson.
     }
 
-    updateAgentAction(actionId, { status: 'approved', decided: true });
+    await updateAgentAction(actionId, { status: 'approved', decided: true });
     const result = await executeToolForAction(actionId, tool, input, ownerId);
     state.messages.push(buildObservationMessage(tool.name, result));
   }
@@ -375,7 +375,7 @@ export function createAgentSseStream(opts: {
             );
             const completionTokens = Math.ceil(text.length / 4);
 
-            insertChatMessage({
+            await insertChatMessage({
               id: uuidv4(),
               threadId,
               role: 'assistant',
@@ -383,7 +383,7 @@ export function createAgentSseStream(opts: {
               metaJson: JSON.stringify({ provider: provider.id, route: 'agent' }),
               tokenCount: completionTokens,
             });
-            recordUsage({
+            await recordUsage({
               id: uuidv4(),
               ownerId,
               provider: provider.id,
@@ -391,13 +391,13 @@ export function createAgentSseStream(opts: {
               promptTokens,
               completionTokens,
             });
-            recordActivity({
+            await recordActivity({
               id: uuidv4(),
               ownerId,
               type: 'agent',
               summary: `Agent answered: "${state.originalMessage.slice(0, 60)}"`,
             });
-            recordRequestLog({
+            await recordRequestLog({
               id: uuidv4(),
               ownerId,
               route,

@@ -16,8 +16,8 @@ export async function GET() {
   const ownerId = session.user.id;
 
   return NextResponse.json({
-    usage: getUsageSummary(ownerId),
-    requestLogs: listRequestLogs(ownerId, 50),
-    errorLogs: listErrorLogs(ownerId, 50),
+    usage: await getUsageSummary(ownerId),
+    requestLogs: await listRequestLogs(ownerId, 50),
+    errorLogs: await listErrorLogs(ownerId, 50),
   });
 }

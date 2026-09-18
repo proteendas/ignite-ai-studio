@@ -85,6 +85,19 @@ needs no API key anywhere. `CONNECTION_TYPE=auto` keeps the cloud default unless
 > **Changing the embeddings provider or model invalidates existing vectors.** Embeddings from
 > different models occupy different spaces and are not comparable — similarity scores against
 > old chunks become meaningless. **Re-ingest every document after switching.**
+>
+> With pgvector there is a second step: `EMBEDDING_DIMENSIONS` must match the new model's output
+> width, and `VECTOR(n)` is fixed at table creation. So the full procedure is: update
+> `EMBEDDING_DIMENSIONS`, run `DROP TABLE document_chunks;`, then re-ingest. The app recreates
+> the table at the new width on the next request.
+>
+> | Model | Dimensions |
+> | --- | --- |
+> | Gemini *(default)* | 768 |
+> | `all-MiniLM-L6-v2` | 384 |
+> | `text-embedding-3-small` | 1536 |
+> | `text-embedding-3-large` | 3072 |
+> | `nomic-embed-text` | 768 |
 
 An embedding cache keyed by `sha256(text) + provider + model` means identical text is never
 embedded twice for the same configuration.

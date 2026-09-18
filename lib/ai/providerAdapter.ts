@@ -85,10 +85,10 @@ function isConfigured(id: ProviderId, keys: ResolvedKeys): boolean {
  * Resolves the effective connection type: the user's stored preference when a
  * userId is given, otherwise the CONNECTION_TYPE env var, defaulting to 'cloud'.
  */
-export function resolveConnectionType(userId?: string): ConnectionType {
+export async function resolveConnectionType(userId?: string): Promise<ConnectionType> {
   if (userId) {
     try {
-      return getUserPreferences(userId).connectionType;
+      return (await getUserPreferences(userId)).connectionType;
     } catch {
       // Preferences unavailable (e.g. DB not initialized) — fall through to env.
     }
@@ -272,9 +272,9 @@ export function withFallback(getProviders: () => AIProvider[]): AIProvider {
  * (in priority order) become fallback candidates, so any /api route that
  * calls resolveProvider() automatically gets fallback behavior.
  */
-export function resolveProvider(userId?: string): AIProvider {
-  const keys = resolveProviderKeys(userId);
-  const connectionType = resolveConnectionType(userId);
+export async function resolveProvider(userId?: string): Promise<AIProvider> {
+  const keys = await resolveProviderKeys(userId);
+  const connectionType = await resolveConnectionType(userId);
 
   if (connectionType === 'local') {
     // Local mode: Ollama only. Wrap its errors so a failure at call time
@@ -388,13 +388,15 @@ export function lightModelFor(id: string): string | undefined {
  * Lists which providers are currently configured (user keys preferred over
  * env), for the provider-health panel. Does not construct clients.
  */
-export function listConfiguredProviders(userId?: string): {
-  id: ProviderId;
-  source: 'user' | 'env';
-}[] {
-  const envKeys = resolveProviderKeys(undefined);
-  const allKeys = resolveProviderKeys(userId);
-  const connectionType = resolveConnectionType(userId);
+export async function listConfiguredProviders(userId?: string): Promise<
+  {
+    id: ProviderId;
+    source: 'user' | 'env';
+  }[]
+> {
+  const envKeys = await resolveProviderKeys(undefined);
+  const allKeys = await resolveProviderKeys(userId);
+  const connectionType = await resolveConnectionType(userId);
 
   const cloud: { id: ProviderId; source: 'user' | 'env' }[] = PRIORITY_ORDER.filter((id) =>
     isConfigured(id, allKeys)

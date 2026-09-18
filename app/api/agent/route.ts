@@ -9,6 +9,10 @@ import { checkRateLimit } from '@/lib/rateLimit';
 import { createAgentSseStream, createInitialState } from '@/lib/ai/agent/loop';
 
 export const runtime = 'nodejs';
+// The ReAct loop may run several tool calls before answering.
+// Vercel caps serverless functions at 10s by default (60s on Hobby without this,
+// 300s on Pro); other platforms ignore it.
+export const maxDuration = 300;
 
 interface AgentRequestBody {
   message?: unknown;
@@ -22,7 +26,7 @@ export async function POST(req: NextRequest) {
   }
   const ownerId = session.user.id;
 
-  const rl = checkRateLimit(`agent:${ownerId}`, { limit: 10, windowMs: 60_000 });
+  const rl = await checkRateLimit(`agent:${ownerId}`, { limit: 10, windowMs: 60_000 });
   if (!rl.allowed) {
     return NextResponse.json({ error: 'Rate limit exceeded, try again shortly.' }, { status: 429 });
   }
@@ -45,14 +49,14 @@ export async function POST(req: NextRequest) {
 
   let provider;
   try {
-    provider = resolveProvider(ownerId);
+    provider = await resolveProvider(ownerId);
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'No AI provider configured.';
     return NextResponse.json({ error: msg }, { status: 503 });
   }
 
   ensureThread(threadId, ownerId);
-  insertChatMessage({
+  await insertChatMessage({
     id: uuidv4(),
     threadId,
     role: 'user',

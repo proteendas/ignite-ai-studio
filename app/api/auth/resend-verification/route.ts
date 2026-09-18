@@ -20,7 +20,7 @@ export async function POST() {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
-  const limit = checkRateLimit(`resend-verification:${ownerId}`, {
+  const limit = await checkRateLimit(`resend-verification:${ownerId}`, {
     limit: 3,
     windowMs: 15 * 60_000,
   });
@@ -32,7 +32,7 @@ export async function POST() {
   }
 
   try {
-    const user = getUserById(ownerId);
+    const user = await getUserById(ownerId);
     if (!user) {
       return NextResponse.json({ error: 'Account not found.' }, { status: 404 });
     }
@@ -40,7 +40,7 @@ export async function POST() {
       return NextResponse.json({ message: 'This address is already verified.', verified: true });
     }
 
-    const token = issueToken(user.id, 'email_verification');
+    const token = await issueToken(user.id, 'email_verification');
     const url = buildActionUrl('/verify-email', token);
     const result = await sendEmail({
       to: user.email,

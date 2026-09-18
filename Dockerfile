@@ -1,19 +1,19 @@
 # syntax=docker/dockerfile:1
 
 # ---- deps: install dependencies in isolation for better layer caching ----
+# No python3/make/g++ needed any more: the data layer moved from better-sqlite3
+# (a native module) to pg, which is pure JavaScript. That removes the native
+# build step entirely and with it the node-gyp failures on newer Node versions.
 FROM node:20-bookworm-slim AS deps
 WORKDIR /app
-RUN apt-get update && apt-get install -y --no-install-recommends python3 make g++ \
-  && rm -rf /var/lib/apt/lists/*
 COPY package.json package-lock.json* ./
-RUN npm install
+RUN npm ci --omit=dev || npm install --omit=dev
 
 # ---- builder: build the Next.js app ----
 FROM node:20-bookworm-slim AS builder
 WORKDIR /app
-RUN apt-get update && apt-get install -y --no-install-recommends python3 make g++ \
-  && rm -rf /var/lib/apt/lists/*
-COPY --from=deps /app/node_modules ./node_modules
+COPY package.json package-lock.json* ./
+RUN npm ci || npm install
 COPY . .
 ENV NEXT_TELEMETRY_DISABLED=1
 RUN npm run build
@@ -24,8 +24,6 @@ WORKDIR /app
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
 
-# better-sqlite3 is a native module; standalone output copies its compiled
-# binding, but the runtime image still needs libstdc++ etc. present.
 RUN apt-get update && apt-get install -y --no-install-recommends openssl \
   && rm -rf /var/lib/apt/lists/*
 
@@ -35,9 +33,6 @@ RUN addgroup --system --gid 1001 nodejs \
 COPY --from=builder /app/public ./public
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
-COPY --from=builder /app/lib/db/sql/schema.sql ./lib/db/sql/schema.sql
-
-RUN mkdir -p /app/data && chown -R nextjs:nodejs /app/data
 
 USER nextjs
 

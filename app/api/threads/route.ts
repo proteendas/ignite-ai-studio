@@ -17,7 +17,7 @@ export async function GET() {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
-  const threads = listChatThreads(session.user.id);
+  const threads = await listChatThreads(session.user.id);
   return NextResponse.json({ threads });
 }
 
@@ -39,7 +39,7 @@ export async function POST(req: NextRequest) {
   const title =
     typeof body.title === 'string' && body.title.trim() ? body.title.trim() : null;
 
-  const thread = createChatThread({
+  const thread = await createChatThread({
     id: uuidv4(),
     ownerId: session.user.id,
     title,

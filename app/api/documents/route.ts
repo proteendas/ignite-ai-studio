@@ -9,6 +9,6 @@ export async function GET() {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
-  const documents = listDocumentsByOwner(session.user.id);
+  const documents = await listDocumentsByOwner(session.user.id);
   return NextResponse.json({ documents });
 }

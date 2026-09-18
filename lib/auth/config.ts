@@ -18,7 +18,7 @@ const credentialsProvider = CredentialsProvider({
       return null;
     }
 
-    const user = getUserByEmail(credentials.email);
+    const user = await getUserByEmail(credentials.email);
     if (!user || !user.passwordHash) {
       return null;
     }
@@ -78,11 +78,11 @@ export const authOptions: NextAuthOptions = {
         // keyed by email so OAuth users also get a stable local id usable as
         // ownerId elsewhere in the app (documents, chat sessions, etc.).
         if (user.email) {
-          const existing = getUserByEmail(user.email);
+          const existing = await getUserByEmail(user.email);
           if (existing) {
             localId = existing.id;
           } else {
-            const created = createUser({
+            const created = await createUser({
               id: uuidv4(),
               email: user.email,
               name: user.name ?? null,

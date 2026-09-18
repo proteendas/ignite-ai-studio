@@ -87,7 +87,7 @@ export const emailSend: ToolDefinition = {
       };
     }
 
-    const conn = getUserConnection(ctx.ownerId, GMAIL_SERVICE);
+    const conn = await getUserConnection(ctx.ownerId, GMAIL_SERVICE);
     if (!conn) {
       return {
         ok: false,

@@ -2,53 +2,49 @@
 
 Two documented paths, and an honest account of which suits what.
 
-| | [Single VM](./ec2-docker.md) | [Free tier](./serverless-free-tier.md) |
+Both paths work today, with no code changes. Pick by how you want to pay and operate it.
+
+| | [Single VM](./ec2-docker.md) | [Vercel + Neon](./serverless-free-tier.md) |
 | --- | --- | --- |
-| **Code changes** | None | None (Option A/B) · **Postgres port** (Option C) |
-| **Cost** | ~$6–15/month, or free on Oracle Always Free | Free |
-| **Persistence** | Full | Full (A) · **wiped on spin-down** (B) · full (C) |
-| **Setup effort** | ~30 minutes | ~30 minutes (A) · a project (C) |
-| **Scales out** | No — single instance by design | Yes, after the port |
-| **Best for** | Anything real | Evaluation, hobby, or a clean rewrite |
+| **Cost** | ~$6–15/month, or free on Oracle Always Free | **Free** |
+| **Setup time** | ~30 minutes | ~15 minutes |
+| **You manage** | The OS, Docker, backups, TLS renewal | Nothing |
+| **Scales out** | No — one machine | Yes, automatically |
+| **Cold starts** | None | Yes (Neon and Vercel both scale to zero) |
+| **Storage** | Whatever the disk holds | 0.5 GB free tier |
+| **Commercial use** | Fine | **Vercel Hobby is non-commercial** |
+| **Best for** | Steady traffic, full control, larger corpora | Getting started, hobby projects, zero ops |
 
-## The constraint that drives everything
+## One database either way
 
-The app stores state in two places that assume a persistent filesystem:
+Both deployments run the same architecture: **Postgres holds everything**, application tables and
+vector embeddings alike, with pgvector providing similarity search.
 
-- **`better-sqlite3`** — a synchronous, file-backed database
-- **Chroma** — a long-running service with a volume
+That means one connection string, one backup, and one thing to keep alive. It is also what makes
+the serverless path possible at all — there is no file on disk and no long-running vector service
+to host.
 
-and the rate limiter holds counters in process memory.
-
-Together these make IgniteAI Studio a **single-instance application**. That is a deliberate
-trade — synchronous SQLite removes a whole class of async bugs and needs no separate database
-server — but it means:
-
-- **Serverless hosting does not work unstyled.** No persistent filesystem, so SQLite data is lost
-  between invocations.
-- **Horizontal scaling does not work.** Two replicas would each hold their own SQLite file and
-  their own rate-limit counters.
-
-Everything in both guides follows from this.
+Chroma is still supported (`VECTOR_DB_PROVIDER=chroma`) for self-hosted deployments that already
+run it, but it is no longer the default and is not needed.
 
 ## Recommendations
 
-**For production: [a single VM](./ec2-docker.md).** Docker Compose, Caddy for automatic TLS, two
-named volumes for data. Matches how the repo is built, and needs no code changes.
+**Just want it running, for free?** → [Vercel + Neon](./serverless-free-tier.md). Nothing to
+administer, HTTPS included, roughly fifteen minutes.
 
-**For free: [Oracle Cloud Always Free](./serverless-free-tier.md#option-a--best-free-tier-that-works-today-unchanged)**
-— 4 Arm cores and 24 GB RAM, no expiry — following the VM guide. This is the best zero-cost
-answer and the one to pick if you just want it running.
+**Production with steady traffic?** → [a single VM](./ec2-docker.md). Predictable cost, no cold
+starts, no storage ceiling, and commercial use is unrestricted.
 
-**For a serverless architecture: [Vercel + Neon](./serverless-free-tier.md#option-c--vercel--neon--render-after-porting-to-postgres)**,
-after porting the data layer to Postgres and pgvector. Architecturally cleaner and genuinely
-scalable, but the port is a project in its own right.
+**Free *and* self-hosted?** → [Oracle Cloud Always Free](./ec2-docker.md#on-oracle-cloud-always-free)
+gives 4 Arm cores and 24 GB RAM with no expiry. Follow the VM guide; it is platform-agnostic.
 
 ## Pre-flight checklist
 
 Whatever the target:
 
 - [ ] `NEXTAUTH_SECRET` set to a strong random value — **never** the shipped default
+- [ ] `DATABASE_URL` set — and on serverless, the **pooled** connection string
+- [ ] `EMBEDDING_DIMENSIONS` matches your embeddings model (768 for the Gemini default)
 - [ ] `ENCRYPTION_KEY` set, at least 16 characters, and **backed up separately from the
       database** (rotating it invalidates every stored provider key)
 - [ ] `NEXTAUTH_URL` is the real public URL, or OAuth callbacks and password-reset links break
@@ -56,18 +52,22 @@ Whatever the target:
 - [ ] `EMBEDDINGS_PROVIDER` configured with its key — separate from the chat provider
 - [ ] `RESEND_API_KEY` and `EMAIL_FROM` set, or password-reset links only reach the server log
 - [ ] HTTPS, not plain HTTP
-- [ ] Chroma **not** publicly reachable — it has no authentication
-- [ ] Backups cover the SQLite file **and** the vector store together
+- [ ] Postgres **not** publicly reachable (port 5432 closed)
+- [ ] Backups run, are stored off-box, and a restore has been **tested**
 - [ ] `.env*` files out of version control
 
 ## Operational notes
 
-- **Schema migrations are automatic.** `schema.sql` is idempotent and `migrateExistingTables()`
-  adds new columns behind a `PRAGMA` guard, both on startup. There is no manual migration step.
+- **Schema migrations are automatic.** The DDL is idempotent and new columns use
+  `ADD COLUMN IF NOT EXISTS`, applied on the first request after a deploy behind a Postgres
+  advisory lock. There is no manual migration step.
 - **Maintenance mode** is `MAINTENANCE_MODE=true` — every page serves `/maintenance`, every API
   route returns 503.
 - **Telemetry grows without bound.** `usage_events`, `request_logs`, `error_logs` and
   `activity_events` have no retention job. Prune them on a long-lived deployment.
-- **Chroma is pinned to 0.5.23.** The `chromadb@1.9.2` client speaks `/api/v1`, which Chroma
-  removed in 0.6.0+. Do not bump the image without upgrading the client and
+- **One backup covers everything.** `pg_dump` captures accounts, documents, chats, encrypted
+  keys and embeddings in a single file. Back up `ENCRYPTION_KEY` separately, or the restored
+  keys are unreadable.
+- **Chroma, if you use it, is pinned to 0.5.23.** The `chromadb@1.9.2` client speaks `/api/v1`,
+  which Chroma removed in 0.6.0+. Do not bump the image without upgrading the client and
   `lib/db/vector/chroma.ts`.

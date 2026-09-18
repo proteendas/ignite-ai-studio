@@ -5,14 +5,12 @@
 | Requirement | Notes |
 | --- | --- |
 | Docker + Docker Compose | The supported path. Nothing else needs installing. |
-| Node.js 20 LTS | Only for the manual, non-Docker setup. |
+| Node.js 20+ | Only for the manual, non-Docker setup. |
+| A Postgres database | Provided by Compose, or use a free [Neon](https://neon.tech) project. |
 | An AI provider key **or** Ollama | At least one. See [providers](./providers.md). |
 
-> **Node version note.** `better-sqlite3` 11.3.0 compiles a native binding. On very new Node
-> releases (24+) no prebuilt binary exists and `npm install` falls back to `node-gyp`, which can
-> fail. Use Node 20 LTS for local development, or run under Docker where the version is pinned.
-> To install dependencies for typechecking only, `npm install --ignore-scripts` skips the native
-> build.
+> There are **no native dependencies**. The data layer uses `pg`, which is pure JavaScript, so
+> `npm install` needs no compiler and works on any Node version.
 
 ## Quick start with Docker
 
@@ -40,6 +38,9 @@
    ENCRYPTION_KEY=...
    ```
 
+   `DATABASE_URL` is set automatically by Compose to point at its own Postgres container, so you
+   do not need to touch it for the Docker path.
+
    Generate the two secrets:
 
    ```bash
@@ -55,8 +56,16 @@
    docker compose up -d --build
    ```
 
-   This brings up the Next.js app on <http://localhost:3000> and a Chroma vector store on port
-   8000.
+   This brings up the Next.js app on <http://localhost:3000> and a Postgres database (with
+   pgvector) on port 5432. The app creates its own tables on the first request — there is no
+   migration step.
+
+   To use Chroma instead of pgvector, start it with its profile and set the provider:
+
+   ```bash
+   docker compose --profile chroma up -d
+   # and in .env: VECTOR_DB_PROVIDER=chroma
+   ```
 
 4. **Create an account** at <http://localhost:3000/login>, then follow the onboarding tour.
 
@@ -72,7 +81,7 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml up
 docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
 ```
 
-This keeps the app and Chroma internal and puts Caddy in front as the only public entrypoint.
+This keeps the app and Postgres internal and puts Caddy in front as the only public entrypoint.
 See the [EC2 deployment guide](./deployment/ec2-docker.md).
 
 ## Manual setup without Docker
@@ -82,14 +91,21 @@ npm install
 cp .env.example .env.local
 ```
 
-Edit `.env.local`, then run Chroma yourself and point the app at it:
+You need a Postgres database with pgvector. Either start just the container:
 
 ```bash
-docker run -p 8000:8000 chromadb/chroma
+docker compose up -d postgres
 ```
 
-Set `CHROMA_URL=http://localhost:8000` and `SQLITE_PATH=./data/app.db` (the Docker defaults
-assume container paths), then:
+…or point `DATABASE_URL` at a free [Neon](https://neon.tech) project. Then set in `.env.local`:
+
+```bash
+DATABASE_URL=postgres://igniteai:igniteai@localhost:5432/igniteai?sslmode=disable
+VECTOR_DB_PROVIDER=pgvector
+EMBEDDING_DIMENSIONS=768
+```
+
+and run:
 
 ```bash
 npm run dev
@@ -147,8 +163,11 @@ There is no test suite in the repo; the build and typecheck are the gate.
 | Symptom | Cause and fix |
 | --- | --- |
 | `Encryption is not configured` in Settings | `ENCRYPTION_KEY` unset or under 16 chars. Set it and restart. |
-| Ingestion fails immediately | Chroma unreachable. Check `CHROMA_URL` and that the container is up. |
+| `DATABASE_URL is not set` | No connection string. Start Postgres (`docker compose up -d postgres`) and set it. |
+| `ECONNREFUSED` on first request | Postgres not up yet, or the wrong port. Check `docker compose ps`. |
+| Upload fails with a dimension error | `EMBEDDING_DIMENSIONS` does not match your embeddings model. Fix it, `DROP TABLE document_chunks;`, re-ingest. |
+| `The pgvector extension is not available` | The image is not `pgvector/pgvector`, or the role cannot `CREATE EXTENSION`. |
 | `No provider configured` (503) | No provider key present, and no reachable Ollama. See [providers](./providers.md). |
 | Scanned PDF ingests with zero chunks | The file has no text layer. OCR it first; the app does not do OCR. |
 | Password reset link never arrives | `RESEND_API_KEY` unset. The link is written to the server log instead — see [configuration](./configuration.md#email). |
-| `npm install` fails building better-sqlite3 | Node too new. Use Node 20 LTS, or `--ignore-scripts` if you only need to typecheck. |
+| `too many connections` | Using a direct rather than pooled connection string on serverless, or `PG_POOL_MAX` too high. |

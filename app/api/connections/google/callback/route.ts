@@ -103,7 +103,7 @@ export async function GET(req: NextRequest) {
   const label = emailFromIdToken(tokenJson.id_token) ?? session.user.email ?? 'Gmail';
 
   const { ciphertext, iv, authTag } = encryptSecret(tokenJson.refresh_token);
-  upsertUserConnection({
+  await upsertUserConnection({
     id: uuidv4(),
     ownerId,
     service: 'google-gmail',
@@ -112,7 +112,7 @@ export async function GET(req: NextRequest) {
     authTag,
     label,
   });
-  recordActivity({
+  await recordActivity({
     id: uuidv4(),
     ownerId,
     type: 'connection',

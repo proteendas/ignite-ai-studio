@@ -13,6 +13,11 @@ Every HTTP endpoint in the application. All routes live in [`app/api/`](../app/a
 - **Ownership** — every resource is scoped to the session user. Requesting another user's
   resource returns **404**, not 403, so ids cannot be probed.
 - **Errors** — always `{"error": "<human-readable message>"}`.
+- **Rate limits** — enforced from a Postgres table, so they hold across instances and serverless
+  invocations. They fail *open*: if the database is unreachable, requests are allowed.
+- **Long-running routes** — `/api/ingest`, `/api/chat`, `/api/agent`, `/api/agent/actions/[id]`
+  and `/api/generate-content` declare `maxDuration`, since they legitimately exceed a serverless
+  platform's default timeout.
 
 ### Shared status codes
 

@@ -20,9 +20,9 @@ const MISSING_CONNECTION: ToolResult = {
     'Settings → Connections before using GitHub tools.',
 };
 
-function resolveGithubToken(ownerId: string): string | null {
+async function resolveGithubToken(ownerId: string): Promise<string | null> {
   if (!isEncryptionConfigured()) return null;
-  const conn = getUserConnection(ownerId, 'github');
+  const conn = await getUserConnection(ownerId, 'github');
   if (!conn) return null;
   try {
     return decryptSecret({ ciphertext: conn.ciphertext, iv: conn.iv, authTag: conn.authTag });
@@ -102,7 +102,7 @@ export const githubGetFile: ToolDefinition = {
   }),
   async execute(input, ctx: ToolContext): Promise<ToolResult> {
     const { repo, path, ref } = input as { repo: string; path: string; ref?: string };
-    const token = resolveGithubToken(ctx.ownerId);
+    const token = await resolveGithubToken(ctx.ownerId);
     if (!token) return MISSING_CONNECTION;
 
     const encodedPath = path.split('/').map(encodeURIComponent).join('/');
@@ -137,7 +137,7 @@ export const githubListIssues: ToolDefinition = {
   inputSchema: z.object({ repo: repoSchema, state: issueStateSchema }),
   async execute(input, ctx: ToolContext): Promise<ToolResult> {
     const { repo, state } = input as { repo: string; state?: 'open' | 'closed' | 'all' };
-    const token = resolveGithubToken(ctx.ownerId);
+    const token = await resolveGithubToken(ctx.ownerId);
     if (!token) return MISSING_CONNECTION;
 
     const { status, json } = await githubFetch(
@@ -162,7 +162,7 @@ export const githubListPrs: ToolDefinition = {
   inputSchema: z.object({ repo: repoSchema, state: issueStateSchema }),
   async execute(input, ctx: ToolContext): Promise<ToolResult> {
     const { repo, state } = input as { repo: string; state?: 'open' | 'closed' | 'all' };
-    const token = resolveGithubToken(ctx.ownerId);
+    const token = await resolveGithubToken(ctx.ownerId);
     if (!token) return MISSING_CONNECTION;
 
     const { status, json } = await githubFetch(
@@ -184,7 +184,7 @@ export const githubCommitHistory: ToolDefinition = {
   inputSchema: z.object({ repo: repoSchema, path: z.string().optional() }),
   async execute(input, ctx: ToolContext): Promise<ToolResult> {
     const { repo, path } = input as { repo: string; path?: string };
-    const token = resolveGithubToken(ctx.ownerId);
+    const token = await resolveGithubToken(ctx.ownerId);
     if (!token) return MISSING_CONNECTION;
 
     const query = path ? `&path=${encodeURIComponent(path)}` : '';
@@ -219,7 +219,7 @@ export const githubCreateIssue: ToolDefinition = {
   }),
   async execute(input, ctx: ToolContext): Promise<ToolResult> {
     const { repo, title, body } = input as { repo: string; title: string; body: string };
-    const token = resolveGithubToken(ctx.ownerId);
+    const token = await resolveGithubToken(ctx.ownerId);
     if (!token) return MISSING_CONNECTION;
 
     const { status, json } = await githubFetch(token, `/repos/${repo}/issues`, {
@@ -248,7 +248,7 @@ export const githubCommentIssue: ToolDefinition = {
   }),
   async execute(input, ctx: ToolContext): Promise<ToolResult> {
     const { repo, issueNumber, body } = input as { repo: string; issueNumber: number; body: string };
-    const token = resolveGithubToken(ctx.ownerId);
+    const token = await resolveGithubToken(ctx.ownerId);
     if (!token) return MISSING_CONNECTION;
 
     const { status, json } = await githubFetch(token, `/repos/${repo}/issues/${issueNumber}/comments`, {

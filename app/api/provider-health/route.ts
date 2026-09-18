@@ -24,7 +24,7 @@ export async function GET() {
   }
   const userId = session.user.id;
 
-  const configured = listConfiguredProviders(userId);
+  const configured = await listConfiguredProviders(userId);
   const configuredIds = new Set<ProviderId>(configured.map((c) => c.id));
 
   const ALL_PROVIDERS: ProviderId[] = [
@@ -52,7 +52,7 @@ export async function GET() {
   });
 
   const activeChat = configured[0]?.id ?? null;
-  const connectionType = resolveConnectionType(userId);
+  const connectionType = await resolveConnectionType(userId);
   const local = await detectOllama();
 
   return NextResponse.json({

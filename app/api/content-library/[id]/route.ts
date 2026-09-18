@@ -11,6 +11,6 @@ export async function DELETE(_req: NextRequest, { params }: { params: { id: stri
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
-  deleteGeneratedContent(params.id, session.user.id);
+  await deleteGeneratedContent(params.id, session.user.id);
   return NextResponse.json({ ok: true });
 }

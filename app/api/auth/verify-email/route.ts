@@ -11,7 +11,7 @@ const schema = z.object({ token: z.string().min(1) });
 /** Redeems an email-verification token and stamps users.email_verified_at. */
 export async function POST(req: NextRequest) {
   const ip = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ?? 'unknown';
-  const limit = checkRateLimit(`verify-email:${ip}`, { limit: 10, windowMs: 15 * 60_000 });
+  const limit = await checkRateLimit(`verify-email:${ip}`, { limit: 10, windowMs: 15 * 60_000 });
   if (!limit.allowed) {
     return NextResponse.json({ error: 'Too many attempts. Please try again later.' }, { status: 429 });
   }
@@ -22,7 +22,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Missing verification token.' }, { status: 400 });
     }
 
-    const ownerId = consumeAuthToken(hashToken(parsed.data.token), 'email_verification');
+    const ownerId = await consumeAuthToken(hashToken(parsed.data.token), 'email_verification');
     if (!ownerId) {
       return NextResponse.json(
         { error: 'This verification link is invalid or has expired. Request a new one.' },
@@ -30,7 +30,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    markEmailVerified(ownerId);
+    await markEmailVerified(ownerId);
     return NextResponse.json({ message: 'Email verified.' });
   } catch (err) {
     console.error('Error verifying email:', err);

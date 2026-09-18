@@ -9,6 +9,6 @@ export async function GET() {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
-  const onboarded = !!getUserById(session.user.id)?.onboardedAt;
+  const onboarded = !!(await getUserById(session.user.id))?.onboardedAt;
   return NextResponse.json({ onboarded });
 }

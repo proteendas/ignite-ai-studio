@@ -17,14 +17,12 @@ export function hashToken(token: string): string {
  * a one-time link. The raw value is never stored, so a lost link can only be
  * replaced, never recovered.
  */
-export function issueToken(ownerId: string, kind: AuthTokenKind): string {
-  purgeStaleAuthTokens();
+export async function issueToken(ownerId: string, kind: AuthTokenKind): Promise<string> {
+  await purgeStaleAuthTokens();
   const token = crypto.randomBytes(32).toString('base64url');
-  const expiresAt = new Date(Date.now() + TTL_MINUTES[kind] * 60_000)
-    .toISOString()
-    .replace('T', ' ')
-    .slice(0, 19); // SQLite datetime('now') format, so string comparison works
-  createAuthToken({ tokenHash: hashToken(token), ownerId, kind, expiresAt });
+  // ISO-8601, which Postgres parses directly into the TIMESTAMPTZ column.
+  const expiresAt = new Date(Date.now() + TTL_MINUTES[kind] * 60_000).toISOString();
+  await createAuthToken({ tokenHash: hashToken(token), ownerId, kind, expiresAt });
   return token;
 }
 

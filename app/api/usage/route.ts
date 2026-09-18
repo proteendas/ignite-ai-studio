@@ -15,8 +15,8 @@ export async function GET() {
 
   const ownerId = session.user.id;
   return NextResponse.json({
-    summary: getUsageSummary(ownerId),
-    documents: countDocuments(ownerId),
-    contentPieces: countGeneratedContent(ownerId),
+    summary: await getUsageSummary(ownerId),
+    documents: await countDocuments(ownerId),
+    contentPieces: await countGeneratedContent(ownerId),
   });
 }

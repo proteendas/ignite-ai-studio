@@ -41,3 +41,29 @@ Running log of bugs, deviations from spec, and decisions made during implementat
 - `tsc --noEmit` clean; `next build` compiles 35 routes; `/icon.svg` served as `image/svg+xml` (tab icon fixed).
 - Docker end-to-end with the user's real Gemini key: register/login; provider-health reports `connectionType` + Ollama detection; grounded chat with zero ready docs → 409 with friendly copy; `.md` ingest → `ready` with real embeddings; **doc-scoped grounded answer with correct facts + inline citations + similarity scores**; outside-knowledge question → exact refusal; thread persistence with tokenCounts + auto-title; re-ingest of identical content → **zero new embedding-cache rows (cache hit)**; change-password wrong-current → 400; all 6 authenticated pages 200; agent mode → plan → `action_request` pause → reject → resumed stream adapts → decision audited (`rejected`, `decidedAt` set). Test account cascade-deleted afterwards.
 - Not runtime-verified: GitHub/Gmail tool execution (needs a user connection), Ollama reachability (no local server on the host during the test window).
+
+## L-U3 — SQLite/Chroma made serverless deployment impossible (Upgrade 3)
+**Symptom:** The app could not be deployed to Vercel at all. Accounts created on a deployed
+instance vanished within minutes.
+**Root cause:** `better-sqlite3` writes to a file on disk, and serverless functions get a fresh,
+empty filesystem per invocation — anything written during one request is gone by the next. Chroma
+compounded it by requiring a long-running process with a volume, which serverless cannot host.
+The in-memory rate limiter had the same class of bug: per-process counters never accumulate.
+**Fix:** Ported the data layer to Postgres (`pg`) and moved embeddings into pgvector in the same
+database. Every db function became async, with the ~40 calling modules updated. The rate limiter
+moved into a `rate_limits` table with an atomic upsert.
+**Deviation:** `specs/plan/architecture.md` previously listed better-sqlite3 and Chroma as
+"retained"; both are superseded. Chroma remains selectable but is no longer the default.
+**Incidental wins:** no native dependency (so no `node-gyp` failures on newer Node); `READ ONLY`
+transactions for NL→SQL; `SELECT … FOR UPDATE` making single-use auth tokens genuinely
+single-use under concurrency; one `pg_dump` backing up the entire dataset including embeddings.
+
+## L-U3b — pgvector VECTOR(n) is fixed at table creation
+**Symptom:** First document upload fails with a dimension mismatch after changing the embeddings
+model.
+**Root cause:** `VECTOR(n)` sets the column width when `document_chunks` is created. Embeddings
+of a different width cannot be inserted.
+**Fix:** `EMBEDDING_DIMENSIONS` (default 768 for Gemini) is validated before insert and the error
+names both the expected and actual width. Changing it requires `DROP TABLE document_chunks;` and
+re-ingesting — which was already necessary, since vectors from different models are not
+comparable.

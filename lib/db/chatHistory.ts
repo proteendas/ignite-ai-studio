@@ -29,15 +29,15 @@ export function estimateTokens(text: string): number {
  * Ensures a thread id maps to a real chat_threads row (creating one if this is
  * the first message of a new thread).
  */
-export function ensureThread(threadId: string, ownerId: string): void {
-  if (!getChatThread(threadId)) {
-    createChatThread({ id: threadId, ownerId });
+export async function ensureThread(threadId: string, ownerId: string): Promise<void> {
+  if (!await getChatThread(threadId)) {
+    await createChatThread({ id: threadId, ownerId });
   }
 }
 
 /** Returns the last N messages as ChatMessage[] suitable for prompt context. */
-export function getHistoryWindow(threadId: string): ChatMessage[] {
-  const recent = getRecentMessages(threadId, RECENT_WINDOW);
+export async function getHistoryWindow(threadId: string): Promise<ChatMessage[]> {
+  const recent = await getRecentMessages(threadId, RECENT_WINDOW);
   return recent.map((m) => ({ role: m.role, content: m.content }));
 }
 
@@ -52,18 +52,18 @@ export async function getCompressedHistory(
   threadId: string,
   provider: AIProvider
 ): Promise<ChatMessage[]> {
-  const recent = getHistoryWindow(threadId);
-  const total = countThreadMessages(threadId);
+  const recent = await getHistoryWindow(threadId);
+  const total = await countThreadMessages(threadId);
   if (total <= RECENT_WINDOW) {
     return recent;
   }
 
   const boundary = total - RECENT_WINDOW;
-  let summary = getThreadSummary(threadId);
+  let summary = await getThreadSummary(threadId);
 
   if (!summary || summary.throughMessageCount < boundary) {
     try {
-      const older = listThreadMessages(threadId).slice(0, boundary);
+      const older = (await listThreadMessages(threadId)).slice(0, boundary);
       const transcript = older
         .map((m) => `${m.role === 'assistant' ? 'Assistant' : 'User'}: ${m.content}`)
         .join('\n');
@@ -76,7 +76,7 @@ export async function getCompressedHistory(
         { temperature: 0, maxTokens: 200, ...(lightModel ? { model: lightModel } : {}) }
       );
       if (text.trim()) {
-        upsertThreadSummary(threadId, text.trim(), boundary);
+        await upsertThreadSummary(threadId, text.trim(), boundary);
         summary = { threadId, summary: text.trim(), throughMessageCount: boundary, updatedAt: '' };
       }
     } catch (err) {
@@ -93,21 +93,21 @@ export async function getCompressedHistory(
   ];
 }
 
-export function recordExchange(
+export async function recordExchange(
   threadId: string,
   userMessage: string,
   assistantMessage: string,
   metaJson?: string,
   documentRefs?: string[]
-): void {
-  insertChatMessage({
+): Promise<void> {
+  await insertChatMessage({
     id: uuidv4(),
     threadId,
     role: 'user',
     content: userMessage,
     tokenCount: estimateTokens(userMessage),
   });
-  insertChatMessage({
+  await insertChatMessage({
     id: uuidv4(),
     threadId,
     role: 'assistant',
@@ -119,11 +119,11 @@ export function recordExchange(
   });
 
   // Auto-title: the first exchange of an untitled thread names it.
-  const thread = getChatThread(threadId);
+  const thread = await getChatThread(threadId);
   if (thread && thread.title === null) {
     const title = userMessage.trim().slice(0, THREAD_TITLE_MAX);
     if (title) {
-      updateChatThread(threadId, { title });
+      await updateChatThread(threadId, { title });
     }
   }
 }

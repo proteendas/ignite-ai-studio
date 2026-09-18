@@ -69,9 +69,12 @@ own address, so it cannot be aimed at an arbitrary inbox.
 - **Uploads** are checked for type, size and filename by
   [`lib/ingest/sanitize.ts`](../lib/ingest/sanitize.ts), and document text is sanitised during
   ingestion to reduce prompt-injection risk.
-- **NL→SQL output** is constrained to read-only statements
-  ([`runReadOnlyQuery`](../lib/db/sql/client.ts)).
-- **SQLite access** uses prepared statements throughout.
+- **NL→SQL output** is constrained by a validator (single `SELECT`, allow-listed tables and
+  columns, no multi-statement) **and** executed inside a Postgres `READ ONLY` transaction
+  ([`runReadOnlyQuery`](../lib/db/sql/client.ts)). Even a bypassed validator cannot write —
+  a guarantee the previous SQLite implementation could not make.
+- **All database access** uses parameterised queries (`$1, $2, …`); no SQL is built by string
+  concatenation with user input.
 
 ### Prompt injection
 
@@ -92,13 +95,21 @@ That is why `sideEffect: 'write'` can never be auto-approved.
 
 ## Rate limiting
 
-[`lib/rateLimit.ts`](../lib/rateLimit.ts) is an in-memory token bucket. Limits are listed in
-[configuration](./configuration.md#rate-limits).
+[`lib/rateLimit.ts`](../lib/rateLimit.ts) is backed by the `rate_limits` table. Limits are listed
+in [configuration](./configuration.md#rate-limits).
 
-> **This is a single-instance design.** Counters live in process memory: they reset on restart
-> and are not shared between replicas. Running more than one instance behind a load balancer
-> means each replica enforces its own copy of the limit, multiplying the effective ceiling.
-> Move to a Redis/Upstash-backed limiter before scaling out.
+Each check is a **single atomic upsert** that either starts a fresh window or increments the
+current one, so concurrent requests — which on a serverless platform land in *different
+processes* — cannot both read a stale count and both be allowed. The limit therefore holds
+however many instances are running.
+
+> **It fails open.** If the database is unreachable, requests are allowed rather than the whole
+> app returning 429 — a database outage should not present as a rate-limit wall. The trade-off is
+> that a database outage also suspends rate limiting.
+
+This replaced an in-memory counter, which was ineffective on serverless (a fresh process per
+invocation meant the counter never accumulated) and wrong on multi-replica deployments (each
+replica enforced its own copy, multiplying the effective ceiling).
 
 ## Account deletion
 
@@ -111,12 +122,17 @@ that provider's retention policy. The privacy policy says so explicitly.
 
 ## Deployment hardening
 
-- Serve over HTTPS only. The EC2 guide uses Caddy, which obtains and renews certificates
+- Serve over HTTPS only. The VM guide uses Caddy, which obtains and renews certificates
   automatically.
-- Keep the app and Chroma off public ports — `docker-compose.prod.yml` exposes only Caddy.
-- **Chroma has no authentication.** Never expose it publicly.
+- Keep the app and Postgres off public ports — `docker-compose.prod.yml` exposes only Caddy.
+  **Port 5432 is your entire dataset behind one password; never open it.**
+- Use a strong, unique `POSTGRES_PASSWORD`. Note the Postgres volume keeps the password it was
+  initialised with — changing the env var afterwards locks the app out.
+- On serverless, use a **pooled** connection string, and require TLS (`sslmode=require`).
 - Set `NEXTAUTH_URL` to the real public URL, or emailed reset links point at localhost.
-- Back up the SQLite file and the Chroma volume together; they are two halves of one dataset.
+- One `pg_dump` now covers the whole dataset, embeddings included. Back up `ENCRYPTION_KEY`
+  **separately** — a restore without it leaves every stored provider key unreadable.
+- If you use Chroma instead of pgvector: it has **no authentication**, so never expose it.
 - Keep `.env*` out of version control — all variants are gitignored.
 
 ## Known limitations
@@ -127,8 +143,11 @@ Worth stating plainly:
 - **No session revocation list.** JWT sessions remain valid until expiry; changing a password
   does not invalidate existing sessions.
 - **No audit log for account actions** beyond agent actions and request/error logs.
-- **Rate limiting does not survive a restart** and does not span replicas.
+- **Rate limiting fails open** on database unavailability.
 - **Telemetry tables grow without bound** — no retention job ships with the app.
+- **No row-level security.** Isolation is enforced in application code (every query filters by
+  `owner_id`), not by Postgres RLS. A missing filter in new code is a data-leak bug; RLS would
+  make it fail closed instead.
 - **Email verification is not enforced.** It is a prompt, not a gate.
 
 ## Reporting

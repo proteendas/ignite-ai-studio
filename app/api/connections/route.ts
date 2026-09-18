@@ -20,7 +20,7 @@ export async function GET() {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
-  const connections: PublicConnection[] = listUserConnections(session.user.id).map((c) => ({
+  const connections: PublicConnection[] = (await listUserConnections(session.user.id)).map((c) => ({
     service: c.service,
     label: c.label,
     createdAt: c.createdAt,
@@ -102,7 +102,7 @@ export async function POST(req: NextRequest) {
     ghUser?.login ?? (typeof body.label === 'string' && body.label.trim() ? body.label.trim() : 'GitHub');
 
   const { ciphertext, iv, authTag } = encryptSecret(token);
-  upsertUserConnection({
+  await upsertUserConnection({
     id: uuidv4(),
     ownerId: session.user.id,
     service: 'github',
@@ -111,7 +111,7 @@ export async function POST(req: NextRequest) {
     authTag,
     label,
   });
-  recordActivity({
+  await recordActivity({
     id: uuidv4(),
     ownerId: session.user.id,
     type: 'connection',

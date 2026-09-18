@@ -13,7 +13,7 @@ export async function GET() {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
-  const user = getUserById(ownerId);
+  const user = await getUserById(ownerId);
   if (!user) {
     return NextResponse.json({ error: 'Account not found.' }, { status: 404 });
   }

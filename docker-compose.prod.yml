@@ -12,8 +12,18 @@ services:
     env_file:
       - .env.production
     environment:
+      - DATABASE_URL=postgres://igniteai:${POSTGRES_PASSWORD}@postgres:5432/igniteai?sslmode=disable
+      - VECTOR_DB_PROVIDER=${VECTOR_DB_PROVIDER:-pgvector}
       - CHROMA_URL=http://chroma:8000
-      - SQLITE_PATH=/app/data/app.db
+
+  postgres:
+    # Never publish the database port in production — Caddy is the only thing
+    # that should be reachable from outside the compose network.
+    ports: !reset []
+    expose:
+      - '5432'
+    environment:
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env.production}
 
   chroma:
     ports: !reset []

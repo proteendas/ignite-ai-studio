@@ -18,7 +18,7 @@ const schema = z.object({ email: z.string().trim().email() });
  */
 export async function POST(req: NextRequest) {
   const ip = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ?? 'unknown';
-  const limit = checkRateLimit(`forgot-password:${ip}`, { limit: 5, windowMs: 15 * 60_000 });
+  const limit = await checkRateLimit(`forgot-password:${ip}`, { limit: 5, windowMs: 15 * 60_000 });
   if (!limit.allowed) {
     return NextResponse.json(
       { error: 'Too many reset requests. Please try again later.' },
@@ -32,12 +32,12 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Enter a valid email address.' }, { status: 400 });
     }
 
-    const user = getUserByEmail(parsed.data.email);
+    const user = await getUserByEmail(parsed.data.email);
 
     // OAuth-only accounts have no password to reset; treat them like unknown
     // addresses so we still reveal nothing.
     if (user?.passwordHash) {
-      const token = issueToken(user.id, 'password_reset');
+      const token = await issueToken(user.id, 'password_reset');
       const url = buildActionUrl('/reset-password', token);
       await sendEmail({
         to: user.email,

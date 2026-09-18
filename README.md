@@ -31,8 +31,12 @@ spec-first (see [`/specs`](./specs)).
   Cerebras, OpenRouter, Together, GitHub Models, Gemini, Cohere, HuggingFace, Cloudflare
   Workers AI) with automatic failover. Users can store their own API keys per provider,
   **encrypted at rest (AES-256-GCM)**. Embeddings run through a dedicated adapter defaulting to
-  **Google Gemini** (free tier) with **HuggingFace** as a fallback. Vector store is Chroma
-  (wired); FAISS / Azure AI Search are pluggable stubs.
+  **Google Gemini** (free tier) with **HuggingFace** as a fallback.
+- **One database**: Postgres holds the application tables *and* the vector embeddings, via
+  **pgvector** with an HNSW cosine index. One connection string, one backup. Chroma remains
+  supported for self-hosted deployments; FAISS / Azure AI Search are pluggable stubs.
+- **Deploys anywhere**: a single VM with Docker Compose, or free on **Vercel + Neon** — no code
+  changes either way. See [deployment](./docs/deployment/README.md).
 
 ## Documentation
 
@@ -62,7 +66,7 @@ This upgrade was built spec-first. The [`/specs`](./specs) folder is the source 
 
 ## Quick start (Docker — recommended)
 
-This is the primary, supported way to run the app. No local Node.js or Chroma install
+This is the primary, supported way to run the app. No local Node.js or Postgres install
 required.
 
 1. **Copy the environment template and add at least one AI provider key:**
@@ -80,6 +84,8 @@ required.
    openssl rand -base64 32
    ```
 
+   `DATABASE_URL` is set for you by Compose and points at its own Postgres container.
+
 2. **Build and start everything:**
 
    ```bash
@@ -88,10 +94,18 @@ required.
 
    This starts two containers:
    - `app` — the Next.js application on [http://localhost:3000](http://localhost:3000)
-   - `chroma` — the Chroma vector database on port 8000
+   - `postgres` — Postgres with pgvector on port 5432
 
-   SQLite data (users, documents, chat history) and Chroma's index both persist in named Docker
-   volumes across restarts.
+   Everything — users, documents, chat history **and** the vector embeddings — lives in one
+   Postgres database, persisted in the `postgres-data` Docker volume. The app creates its own
+   tables on the first request; there is no migration step.
+
+   To use Chroma instead of pgvector, start it under its profile and set
+   `VECTOR_DB_PROVIDER=chroma`:
+
+   ```bash
+   docker compose --profile chroma up -d
+   ```
 
 3. **Open [http://localhost:3000](http://localhost:3000)**, register an account, upload a
    document on the Documents page, then try Chat and Content Generator.
@@ -123,19 +137,26 @@ If you'd rather run Node directly:
 ```bash
 npm install
 cp .env.example .env.local
-# Edit .env.local: set an AI provider key, and either run your own Chroma
-# server (see below) or point CHROMA_URL at one.
+# Edit .env.local: set DATABASE_URL and at least one AI provider key.
 npm run dev
 ```
 
-Chroma still needs to run somewhere — either via Docker on its own:
+You need a Postgres database with pgvector. Either start just that container:
 
 ```bash
-docker run -p 8000:8000 chromadb/chroma
+docker compose up -d postgres
 ```
 
-or `pip install chromadb && chroma run --path ./chroma-data`. Set `CHROMA_URL=http://localhost:8000`
-in `.env.local` either way. `SQLITE_PATH` can be left as the default relative path for manual dev.
+…or point `DATABASE_URL` at a free [Neon](https://neon.tech) project. Then set in `.env.local`:
+
+```bash
+DATABASE_URL=postgres://igniteai:igniteai@localhost:5432/igniteai?sslmode=disable
+VECTOR_DB_PROVIDER=pgvector
+EMBEDDING_DIMENSIONS=768
+```
+
+The app creates its own tables on the first request — there is no migration step. There are no
+native dependencies, so `npm install` needs no compiler.
 
 ## Choosing providers
 
@@ -218,26 +239,26 @@ flowchart TB
         OTHERS[Azure / Mistral / Gemini / Cohere / .../]
     end
 
-    subgraph Data
-        CHROMA[(Chroma<br/>vector store)]
-        SQLITE[(SQLite<br/>users, documents, threads,<br/>generated content, usage/logs,<br/>encrypted keys, demo orders/products)]
+    subgraph Data["Postgres (one database)"]
+        PGVEC[(pgvector<br/>document_chunks<br/>HNSW cosine index)]
+        PGTAB[(application tables<br/>users, documents, threads,<br/>generated content, usage/logs,<br/>encrypted keys, rate limits,<br/>demo orders/products)]
     end
 
-    UI -->|upload| INGEST --> PARSE --> EMB --> CHROMA
-    INGEST --> SQLITE
+    UI -->|upload| INGEST --> PARSE --> EMB --> PGVEC
+    INGEST --> PGTAB
 
     UI -->|ask| CHAT --> INTENT
     INTENT -->|document| EMB
-    EMB --> CHROMA --> PROMPTS
-    INTENT -->|structured-data| NLSQL --> SQLITE
+    EMB --> PGVEC --> PROMPTS
+    INTENT -->|structured-data| NLSQL --> PGTAB
     NLSQL --> PROMPTS
     PROMPTS --> ADAPTER
     ADAPTER --> KEYS
     KEYS --> CRYPTO
-    CRYPTO -.decrypt.-> SQLITE
+    CRYPTO -.decrypt.-> PGTAB
     ADAPTER --> GROQ & OPENAI & OTHERS
     CHAT -->|SSE stream| UI
-    CHAT --> SQLITE
+    CHAT --> PGTAB
 
     UI -->|generate / batch| GEN --> CHROMA
     GEN --> ADAPTER
@@ -258,8 +279,10 @@ flowchart TB
   /ai/                  providerAdapter.ts + providers/*, embeddingsAdapter.ts (Gemini/HF),
                         keyResolver.ts (per-user keys), prompts.ts
   /db/
-    /vector/            VectorStore interface + Chroma (wired), FAISS/Azure AI Search (stubs)
-    /sql/               SQLite client, schema, seeded demo data, guarded NL→SQL
+    /vector/            VectorStore interface + pgvector (default) and Chroma (both wired),
+                        FAISS/Azure AI Search (stubs)
+    /sql/               Postgres pool + query/transaction helpers, schema.ts (inlined DDL),
+                        seeded demo data, guarded NL→SQL
     chatHistory.ts       multi-turn context window
   /auth/                NextAuth config, password hashing
   /ingest/              Document parsing, chunking, sanitization
@@ -283,19 +306,26 @@ Dockerfile, docker-compose.yml, docker-compose.dev.yml, .dockerignore
   scan (e.g. ClamAV) is left as a documented hook, not faked, since no AV binary is available
   in this environment — wire it in before handling untrusted uploads in production.
 - NL→SQL is guarded: only `SELECT` statements against an allow-listed table/column set are
-  permitted, multi-statement queries are rejected, and execution uses `better-sqlite3`'s
-  `.prepare().all()` (which only ever compiles a single statement) rather than `.exec()`.
+  permitted, multi-statement queries are rejected, and execution runs inside a Postgres
+  `READ ONLY` transaction — so even a bypassed validator cannot write.
 - All protected pages and API routes require a valid session (`middleware.ts`); unauthenticated
   API calls get a 401, unauthenticated page loads redirect to `/login`.
-- Per-user/IP rate limiting applies to ingest, chat, and content generation.
+- Per-user/IP rate limiting applies to ingest, chat, agent actions, content generation and the
+  auth flows. Counters live in Postgres and are incremented atomically, so the limit holds across
+  multiple instances and serverless invocations.
+- Password-reset and email-verification tokens are stored only as SHA-256 hashes, expire, and are
+  single-use — redemption is serialised with `SELECT … FOR UPDATE` so a token cannot be redeemed
+  twice.
 
 ## Known limitations / extension points
 
 - **FAISS and Azure AI Search** vector stores are stubs (`lib/db/vector/faiss.ts`,
-  `azureSearch.ts`) implementing the same interface as Chroma — each has inline instructions
-  for wiring up the real client. Set `VECTOR_DB_PROVIDER` to select one once implemented.
-  Similarly, structured data currently runs on the built-in SQLite demo schema; swapping in a
-  real Postgres or Cosmos DB means adding a client behind the same `runReadOnlyQuery` interface.
+  `azureSearch.ts`) implementing the same `VectorStore` interface as pgvector and Chroma — each
+  has inline instructions for wiring up the real client. Set `VECTOR_DB_PROVIDER` to select one
+  once implemented.
+- **`EMBEDDING_DIMENSIONS` is fixed once the vector table exists.** `VECTOR(n)` is set at table
+  creation, so changing the embeddings model means `DROP TABLE document_chunks;` and re-ingesting
+  — which is required anyway, since vectors from different models are not comparable.
 - Streaming fallback across providers only works for failures that occur **before** the first
   token is produced — once a stream has started emitting partial output, it can't silently hop
   providers without corrupting the response.

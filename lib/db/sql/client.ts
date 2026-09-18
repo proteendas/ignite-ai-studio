@@ -1,116 +1,194 @@
-import Database from 'better-sqlite3';
-import fs from 'fs';
-import path from 'path';
+import { Pool, type PoolClient } from 'pg';
 import { env } from '@/lib/env';
 import type { DocumentRecord } from '@/lib/types';
+import { SCHEMA_SQL } from './schema';
 
 // ---------------------------------------------------------------------------
-// Singleton connection (Next.js dev hot-reload safe: stash on globalThis under
-// a unique symbol so repeated module re-evaluation during hot reload doesn't
-// re-open the sqlite file / re-run schema+seed on every edit).
+// Connection pool
+//
+// Stashed on globalThis under a symbol so Next.js hot reload (which
+// re-evaluates modules) does not open a new pool on every edit, and so
+// serverless invocations that reuse a warm container reuse the pool too.
+//
+// `max` is deliberately small: serverless platforms run many concurrent
+// instances, each with its own pool, and Postgres connection limits are per
+// server, not per instance. Neon's pooled endpoint (a `-pooler` host) or
+// PgBouncer in front is what actually makes this safe at scale.
 // ---------------------------------------------------------------------------
 
-const DB_SYMBOL = Symbol.for('igniteai-studio.sqlite-db');
+const POOL_SYMBOL = Symbol.for('igniteai-studio.pg-pool');
+const READY_SYMBOL = Symbol.for('igniteai-studio.pg-ready');
 
 interface GlobalWithDb {
-  [key: symbol]: Database.Database | undefined;
+  [key: symbol]: unknown;
 }
 
 const globalForDb = globalThis as unknown as GlobalWithDb;
 
+function createPool(): Pool {
+  if (!env.databaseUrl) {
+    throw new Error(
+      'DATABASE_URL is not set. IgniteAI Studio needs a Postgres connection string — ' +
+        'e.g. postgres://user:pass@host/db?sslmode=require. For local development, ' +
+        '`docker compose up -d postgres` starts one.'
+    );
+  }
+
+  return new Pool({
+    connectionString: env.databaseUrl,
+    max: env.pgPoolMax,
+    idleTimeoutMillis: 10_000,
+    connectionTimeoutMillis: 15_000,
+    // Managed Postgres (Neon, Supabase, RDS) terminates TLS with certificates
+    // that are not in Node's default trust store. Verification is disabled only
+    // when the connection string does not already ask for a stricter mode.
+    ssl: env.databaseUrl.includes('sslmode=disable') ? false : { rejectUnauthorized: false },
+  });
+}
+
+export function getPool(): Pool {
+  if (!globalForDb[POOL_SYMBOL]) {
+    globalForDb[POOL_SYMBOL] = createPool();
+  }
+  return globalForDb[POOL_SYMBOL] as Pool;
+}
+
 /**
- * Next.js's standalone build output bundles server code via webpack/Next's
- * file tracing, so `__dirname` at runtime does not reliably resolve back to
- * this source file's original location (lib/db/sql/). We try several
- * plausible locations instead of assuming one — this file's own directory
- * (works in dev / ts-node-style runs), the project root's lib/db/sql
- * (works if cwd is the app root, e.g. `next start`), and process.cwd()-based
- * variants for the standalone Docker runtime, which the Dockerfile also
- * copies schema.sql into explicitly to cover.
+ * Applies the schema exactly once per process.
+ *
+ * The bootstrap promise is memoised on globalThis, so concurrent requests in a
+ * warm container await the same in-flight promise rather than each running the
+ * DDL. Across *separate* instances (a serverless cold-start storm) concurrent
+ * `CREATE TABLE IF NOT EXISTS` can still race and raise a duplicate-object
+ * error, so the whole thing runs inside a Postgres advisory lock: the first
+ * instance applies the schema, the rest wait and then find it already there.
  */
-function resolveSchemaPath(): string {
-  const candidates = [
-    path.join(__dirname, 'schema.sql'),
-    path.join(process.cwd(), 'lib', 'db', 'sql', 'schema.sql'),
-    path.join(process.cwd(), '.next', 'standalone', 'lib', 'db', 'sql', 'schema.sql'),
+async function ensureSchema(): Promise<void> {
+  const pool = getPool();
+  const client = await pool.connect();
+  try {
+    await client.query('SELECT pg_advisory_lock($1)', [BOOTSTRAP_LOCK_ID]);
+    try {
+      await client.query(SCHEMA_SQL);
+      await migrateExistingTables(client);
+      await seedDemoDataIfEmpty(client);
+    } finally {
+      await client.query('SELECT pg_advisory_unlock($1)', [BOOTSTRAP_LOCK_ID]);
+    }
+  } finally {
+    client.release();
+  }
+}
+
+/** Arbitrary but fixed: any 64-bit int works, it just has to be the same everywhere. */
+const BOOTSTRAP_LOCK_ID = 4_113_507_001;
+
+function ready(): Promise<void> {
+  if (!globalForDb[READY_SYMBOL]) {
+    // Cache the promise, not its result, so concurrent callers share one run.
+    // On failure the cache is cleared so the next request retries rather than
+    // permanently poisoning the container.
+    globalForDb[READY_SYMBOL] = ensureSchema().catch((err) => {
+      globalForDb[READY_SYMBOL] = undefined;
+      throw err;
+    });
+  }
+  return globalForDb[READY_SYMBOL] as Promise<void>;
+}
+
+/**
+ * Runs a parameterised query, applying the schema first if this process has
+ * not yet done so. Every exported function below goes through here, so no
+ * caller has to think about bootstrap ordering.
+ */
+async function query<T extends Record<string, unknown> = Record<string, unknown>>(
+  sql: string,
+  params: unknown[] = []
+): Promise<T[]> {
+  await ready();
+  const result = await getPool().query(sql, params);
+  return result.rows as T[];
+}
+
+/** Single-row convenience wrapper. */
+async function queryOne<T extends Record<string, unknown> = Record<string, unknown>>(
+  sql: string,
+  params: unknown[] = []
+): Promise<T | null> {
+  const rows = await query<T>(sql, params);
+  return rows[0] ?? null;
+}
+
+/**
+ * Runs `fn` inside a transaction on a dedicated connection, committing on
+ * success and rolling back on any throw.
+ */
+async function transaction<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {
+  await ready();
+  const client = await getPool().connect();
+  try {
+    await client.query('BEGIN');
+    const result = await fn(client);
+    await client.query('COMMIT');
+    return result;
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => undefined);
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Columns added after a table already exists in a deployed database. Postgres
+ * supports ADD COLUMN IF NOT EXISTS directly, so unlike the SQLite original
+ * this needs no information_schema probing to stay idempotent.
+ */
+async function migrateExistingTables(client: PoolClient): Promise<void> {
+  const statements = [
+    `ALTER TABLE chat_messages    ADD COLUMN IF NOT EXISTS token_count INTEGER NOT NULL DEFAULT 0`,
+    `ALTER TABLE chat_messages    ADD COLUMN IF NOT EXISTS document_refs TEXT`,
+    `ALTER TABLE user_preferences ADD COLUMN IF NOT EXISTS connection_type TEXT DEFAULT 'cloud'`,
+    `ALTER TABLE user_preferences ADD COLUMN IF NOT EXISTS auto_approve_json TEXT`,
+    `ALTER TABLE users            ADD COLUMN IF NOT EXISTS email_verified_at TIMESTAMPTZ`,
   ];
-
-  for (const candidate of candidates) {
-    if (fs.existsSync(candidate)) {
-      return candidate;
-    }
+  for (const sql of statements) {
+    await client.query(sql);
   }
-
-  throw new Error(
-    `Could not locate schema.sql. Tried: ${candidates.join(', ')}. ` +
-      'If running a custom deployment layout, ensure lib/db/sql/schema.sql is copied ' +
-      'alongside the server output.'
-  );
-}
-
-function openDb(): Database.Database {
-  const sqlitePath = env.sqlitePath;
-  fs.mkdirSync(path.dirname(sqlitePath), { recursive: true });
-
-  const db = new Database(sqlitePath);
-  db.pragma('journal_mode = WAL');
-  db.pragma('foreign_keys = ON');
-
-  const schemaSql = fs.readFileSync(resolveSchemaPath(), 'utf-8');
-  db.exec(schemaSql);
-
-  migrateExistingTables(db);
-  seedDemoDataIfEmpty(db);
-
-  return db;
-}
-
-/**
- * schema.sql only uses CREATE TABLE IF NOT EXISTS, which cannot add columns to
- * tables that already exist in a deployed database. Columns added after the
- * initial release are back-filled here, guarded by PRAGMA table_info so the
- * migration is idempotent and safe to run on every startup.
- */
-function migrateExistingTables(db: Database.Database): void {
-  const ensureColumn = (table: string, column: string, ddl: string) => {
-    const cols = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
-    if (!cols.some((c) => c.name === column)) {
-      db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
-    }
-  };
-
-  ensureColumn('chat_messages', 'token_count', 'token_count INTEGER NOT NULL DEFAULT 0');
-  ensureColumn('chat_messages', 'document_refs', 'document_refs TEXT');
-  ensureColumn('user_preferences', 'connection_type', "connection_type TEXT DEFAULT 'cloud'");
-  ensureColumn('user_preferences', 'auto_approve_json', 'auto_approve_json TEXT');
-  ensureColumn('users', 'email_verified_at', 'email_verified_at TEXT');
-}
-
-export function getDb(): Database.Database {
-  if (!globalForDb[DB_SYMBOL]) {
-    globalForDb[DB_SYMBOL] = openDb();
-  }
-  return globalForDb[DB_SYMBOL]!;
 }
 
 // ---------------------------------------------------------------------------
-// Demo data seeding for products/orders (Level 2 NL -> SQL routing demo data).
+// Value coercion
+//
+// node-postgres hydrates TIMESTAMPTZ/DATE as JS Date and BIGINT as string.
+// The application's record types are all plain strings/numbers, so every
+// mapper funnels through these rather than leaking driver types upward.
 // ---------------------------------------------------------------------------
 
-function seedDemoDataIfEmpty(db: Database.Database): void {
-  const row = db.prepare('SELECT COUNT(*) as count FROM products').get() as {
-    count: number;
-  };
-  if (row.count > 0) {
-    return;
-  }
+function toIso(value: unknown): string {
+  if (value instanceof Date) return value.toISOString();
+  return value == null ? '' : String(value);
+}
 
-  const insertProduct = db.prepare(
-    `INSERT INTO products (id, name, category, price, stock) VALUES (?, ?, ?, ?, ?)`
-  );
-  const insertOrder = db.prepare(
-    `INSERT INTO orders (id, product_id, customer_name, quantity, order_date, status) VALUES (?, ?, ?, ?, ?, ?)`
-  );
+function toIsoOrNull(value: unknown): string | null {
+  if (value == null) return null;
+  return toIso(value);
+}
+
+function toNum(value: unknown): number {
+  if (typeof value === 'number') return value;
+  if (value == null) return 0;
+  const parsed = Number(value);
+  return Number.isNaN(parsed) ? 0 : parsed;
+}
+
+// ---------------------------------------------------------------------------
+// Demo data seeding for products/orders (NL -> SQL routing demo data).
+// ---------------------------------------------------------------------------
+
+async function seedDemoDataIfEmpty(client: PoolClient): Promise<void> {
+  const { rows } = await client.query('SELECT COUNT(*)::int AS count FROM products');
+  if ((rows[0] as { count: number }).count > 0) return;
 
   const products: Array<[number, string, string, number, number]> = [
     [1, 'Wireless Noise-Cancelling Headphones', 'Electronics', 149.99, 42],
@@ -123,14 +201,13 @@ function seedDemoDataIfEmpty(db: Database.Database): void {
     [8, 'Leather Laptop Sleeve', 'Accessories', 45.0, 55],
   ];
 
-  const insertProductsTx = db.transaction(
-    (rows: Array<[number, string, string, number, number]>) => {
-      for (const rowValues of rows) {
-        insertProduct.run(...rowValues);
-      }
-    }
-  );
-  insertProductsTx(products);
+  for (const row of products) {
+    await client.query(
+      `INSERT INTO products (id, name, category, price, stock)
+       VALUES ($1, $2, $3, $4, $5) ON CONFLICT (id) DO NOTHING`,
+      row
+    );
+  }
 
   const orders: Array<[number, number, string, number, string, string]> = [
     [1, 1, 'Alice Nguyen', 1, '2026-06-01', 'delivered'],
@@ -144,32 +221,31 @@ function seedDemoDataIfEmpty(db: Database.Database): void {
     [9, 8, 'Isla Thompson', 1, '2026-07-02', 'shipped'],
     [10, 2, 'Jamal Carter', 1, '2026-07-05', 'pending'],
     [11, 3, 'Kira Yamamoto', 2, '2026-07-10', 'pending'],
-    [12, 5, 'Liam O\'Brien', 1, '2026-07-14', 'shipped'],
+    [12, 5, "Liam O'Brien", 1, '2026-07-14', 'shipped'],
   ];
 
-  const insertOrdersTx = db.transaction(
-    (rows: Array<[number, number, string, number, string, string]>) => {
-      for (const rowValues of rows) {
-        insertOrder.run(...rowValues);
-      }
-    }
-  );
-  insertOrdersTx(orders);
+  for (const row of orders) {
+    await client.query(
+      `INSERT INTO orders (id, product_id, customer_name, quantity, order_date, status)
+       VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (id) DO NOTHING`,
+      row
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------
-// Typed row shapes (snake_case, as stored in sqlite)
+// Typed row shapes (snake_case, as stored)
 // ---------------------------------------------------------------------------
 
-interface UserRow {
+interface UserRow extends Record<string, unknown> {
   id: string;
   email: string;
   password_hash: string | null;
   name: string | null;
   provider: string | null;
-  onboarded_at: string | null;
-  email_verified_at: string | null;
-  created_at: string;
+  onboarded_at: Date | null;
+  email_verified_at: Date | null;
+  created_at: Date;
 }
 
 export interface UserRecord {
@@ -183,25 +259,25 @@ export interface UserRecord {
   createdAt: string;
 }
 
-interface DocumentRow {
+interface DocumentRow extends Record<string, unknown> {
   id: string;
   owner_id: string;
   filename: string;
   mime_type: string;
-  size_bytes: number;
+  size_bytes: string | number;
   status: string;
   chunk_count: number;
   error: string | null;
-  created_at: string;
+  created_at: Date;
 }
 
-interface ChatThreadRow {
+interface ChatThreadRow extends Record<string, unknown> {
   id: string;
   owner_id: string;
   title: string | null;
-  pinned: number;
-  created_at: string;
-  updated_at: string;
+  pinned: boolean;
+  created_at: Date;
+  updated_at: Date;
 }
 
 export interface ChatThreadRecord {
@@ -213,7 +289,7 @@ export interface ChatThreadRecord {
   updatedAt: string;
 }
 
-interface ChatMessageRow {
+interface ChatMessageRow extends Record<string, unknown> {
   id: string;
   thread_id: string;
   role: string;
@@ -221,7 +297,7 @@ interface ChatMessageRow {
   meta_json: string | null;
   token_count: number;
   document_refs: string | null;
-  created_at: string;
+  created_at: Date;
 }
 
 export interface ChatMessageRecord {
@@ -247,9 +323,9 @@ function mapUserRow(row: UserRow): UserRecord {
     passwordHash: row.password_hash,
     name: row.name,
     provider: row.provider,
-    onboardedAt: row.onboarded_at,
-    emailVerifiedAt: row.email_verified_at,
-    createdAt: row.created_at,
+    onboardedAt: toIsoOrNull(row.onboarded_at),
+    emailVerifiedAt: toIsoOrNull(row.email_verified_at),
+    createdAt: toIso(row.created_at),
   };
 }
 
@@ -259,10 +335,10 @@ function mapDocumentRow(row: DocumentRow): DocumentRecord {
     ownerId: row.owner_id,
     filename: row.filename,
     mimeType: row.mime_type,
-    sizeBytes: row.size_bytes,
+    sizeBytes: toNum(row.size_bytes),
     status: row.status as DocumentRecord['status'],
-    chunkCount: row.chunk_count,
-    createdAt: row.created_at,
+    chunkCount: toNum(row.chunk_count),
+    createdAt: toIso(row.created_at),
     error: row.error ?? undefined,
   };
 }
@@ -272,9 +348,9 @@ function mapChatThreadRow(row: ChatThreadRow): ChatThreadRecord {
     id: row.id,
     ownerId: row.owner_id,
     title: row.title,
-    pinned: row.pinned === 1,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
+    pinned: row.pinned === true,
+    createdAt: toIso(row.created_at),
+    updatedAt: toIso(row.updated_at),
   };
 }
 
@@ -285,9 +361,9 @@ function mapChatMessageRow(row: ChatMessageRow): ChatMessageRecord {
     role: row.role as ChatMessageRecord['role'],
     content: row.content,
     metaJson: row.meta_json,
-    tokenCount: row.token_count ?? 0,
+    tokenCount: toNum(row.token_count),
     documentRefs: row.document_refs,
-    createdAt: row.created_at,
+    createdAt: toIso(row.created_at),
   };
 }
 
@@ -298,137 +374,124 @@ function mapChatMessageRow(row: ChatMessageRow): ChatMessageRecord {
 /**
  * Canonicalizes an email for storage and lookup. Emails are case-insensitive
  * in practice, and mobile keyboards / autofill routinely change the casing of
- * what a user types. Normalizing to lowercase + trimmed in this single place
- * guarantees registration, credentials sign-in, and OAuth auto-provisioning
- * all agree on the same key — otherwise signing up as "User@x.com" and later
- * signing in as "user@x.com" would fail lookup and surface as a bogus
- * "incorrect password" error.
+ * what a user types. Normalizing in this single place guarantees registration,
+ * credentials sign-in and OAuth auto-provisioning all agree on the same key.
  */
 export function normalizeEmail(email: string): string {
   return email.trim().toLowerCase();
 }
 
-export function getUserByEmail(email: string): UserRecord | null {
-  const db = getDb();
-  const row = db
-    .prepare('SELECT * FROM users WHERE email = ?')
-    .get(normalizeEmail(email)) as UserRow | undefined;
+export async function getUserByEmail(email: string): Promise<UserRecord | null> {
+  const row = await queryOne<UserRow>('SELECT * FROM users WHERE email = $1', [
+    normalizeEmail(email),
+  ]);
   return row ? mapUserRow(row) : null;
 }
 
-export function createUser(user: {
+export async function createUser(user: {
   id: string;
   email: string;
   passwordHash?: string | null;
   name?: string | null;
   provider?: string;
-}): UserRecord {
-  const db = getDb();
+}): Promise<UserRecord> {
   const email = normalizeEmail(user.email);
-  db.prepare(
-    `INSERT INTO users (id, email, password_hash, name, provider) VALUES (?, ?, ?, ?, ?)`
-  ).run(
-    user.id,
-    email,
-    user.passwordHash ?? null,
-    user.name ?? null,
-    user.provider ?? 'credentials'
+  const row = await queryOne<UserRow>(
+    `INSERT INTO users (id, email, password_hash, name, provider)
+     VALUES ($1, $2, $3, $4, $5)
+     RETURNING *`,
+    [user.id, email, user.passwordHash ?? null, user.name ?? null, user.provider ?? 'credentials']
   );
-  const created = getUserByEmail(email);
-  if (!created) {
-    throw new Error('Failed to read back created user');
-  }
-  return created;
+  if (!row) throw new Error('Failed to read back created user');
+  return mapUserRow(row);
 }
 
-export function getUserById(id: string): UserRecord | null {
-  const db = getDb();
-  const row = db.prepare('SELECT * FROM users WHERE id = ?').get(id) as UserRow | undefined;
+export async function getUserById(id: string): Promise<UserRecord | null> {
+  const row = await queryOne<UserRow>('SELECT * FROM users WHERE id = $1', [id]);
   return row ? mapUserRow(row) : null;
 }
 
-export function updateUserPassword(userId: string, passwordHash: string): void {
-  const db = getDb();
-  db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(passwordHash, userId);
+export async function updateUserPassword(userId: string, passwordHash: string): Promise<void> {
+  await query('UPDATE users SET password_hash = $1 WHERE id = $2', [passwordHash, userId]);
 }
 
-export function markOnboarded(ownerId: string): void {
-  const db = getDb();
-  db.prepare(`UPDATE users SET onboarded_at = datetime('now') WHERE id = ?`).run(ownerId);
+export async function markOnboarded(ownerId: string): Promise<void> {
+  await query('UPDATE users SET onboarded_at = now() WHERE id = $1', [ownerId]);
 }
 
-/** Cascade-deletes every row belonging to a user across all tables (account deletion). */
 // ---------------------------------------------------------------------------
 // Email verification + single-use auth tokens (password reset / verify email)
 // ---------------------------------------------------------------------------
 
 export type AuthTokenKind = 'password_reset' | 'email_verification';
 
-export function markEmailVerified(ownerId: string): void {
-  const db = getDb();
-  db.prepare(`UPDATE users SET email_verified_at = datetime('now') WHERE id = ?`).run(ownerId);
+export async function markEmailVerified(ownerId: string): Promise<void> {
+  await query('UPDATE users SET email_verified_at = now() WHERE id = $1', [ownerId]);
 }
 
 /**
  * Stores the sha256 hash of a freshly minted token. Any outstanding token of
- * the same kind for this user is dropped first so a new request always
- * invalidates the previous link.
+ * the same kind for this user is dropped first, so requesting a new link always
+ * invalidates the previous one.
  */
-export function createAuthToken(params: {
+export async function createAuthToken(params: {
   tokenHash: string;
   ownerId: string;
   kind: AuthTokenKind;
   expiresAt: string;
-}): void {
-  const db = getDb();
-  const tx = db.transaction(() => {
-    db.prepare('DELETE FROM auth_tokens WHERE owner_id = ? AND kind = ?').run(
+}): Promise<void> {
+  await transaction(async (client) => {
+    await client.query('DELETE FROM auth_tokens WHERE owner_id = $1 AND kind = $2', [
       params.ownerId,
-      params.kind
+      params.kind,
+    ]);
+    await client.query(
+      `INSERT INTO auth_tokens (token_hash, owner_id, kind, expires_at)
+       VALUES ($1, $2, $3, $4)`,
+      [params.tokenHash, params.ownerId, params.kind, params.expiresAt]
     );
-    db.prepare(
-      `INSERT INTO auth_tokens (token_hash, owner_id, kind, expires_at) VALUES (?, ?, ?, ?)`
-    ).run(params.tokenHash, params.ownerId, params.kind, params.expiresAt);
   });
-  tx();
 }
 
 /**
- * Atomically claims a token: returns its owner only if the token exists, is of
- * the expected kind, has not expired and has not already been consumed. The
- * consume-and-check happens in one transaction so a token cannot be redeemed
- * twice by concurrent requests.
+ * Atomically claims a token, returning its owner only if the token exists, is
+ * of the expected kind, has not expired and has not already been consumed.
+ *
+ * The SELECT takes `FOR UPDATE` so two concurrent redemptions of the same token
+ * serialise: the second blocks until the first commits, then sees
+ * consumed_at set and returns null. Without the row lock both could read the
+ * unconsumed row and both succeed.
  */
-export function consumeAuthToken(tokenHash: string, kind: AuthTokenKind): string | null {
-  const db = getDb();
-  const tx = db.transaction(() => {
-    const row = db
-      .prepare(
-        `SELECT owner_id FROM auth_tokens
-         WHERE token_hash = ? AND kind = ? AND consumed_at IS NULL
-           AND expires_at > datetime('now')`
-      )
-      .get(tokenHash, kind) as { owner_id: string } | undefined;
-    if (!row) return null;
-    db.prepare(`UPDATE auth_tokens SET consumed_at = datetime('now') WHERE token_hash = ?`).run(
-      tokenHash
+export async function consumeAuthToken(
+  tokenHash: string,
+  kind: AuthTokenKind
+): Promise<string | null> {
+  return transaction(async (client) => {
+    const { rows } = await client.query(
+      `SELECT owner_id FROM auth_tokens
+       WHERE token_hash = $1 AND kind = $2 AND consumed_at IS NULL AND expires_at > now()
+       FOR UPDATE`,
+      [tokenHash, kind]
     );
+    const row = rows[0] as { owner_id: string } | undefined;
+    if (!row) return null;
+    await client.query('UPDATE auth_tokens SET consumed_at = now() WHERE token_hash = $1', [
+      tokenHash,
+    ]);
     return row.owner_id;
   });
-  return tx();
 }
 
 /** Housekeeping: drop tokens that expired or were used more than a day ago. */
-export function purgeStaleAuthTokens(): void {
-  const db = getDb();
-  db.prepare(
+export async function purgeStaleAuthTokens(): Promise<void> {
+  await query(
     `DELETE FROM auth_tokens
-     WHERE expires_at <= datetime('now') OR consumed_at <= datetime('now', '-1 day')`
-  ).run();
+     WHERE expires_at <= now() OR consumed_at <= now() - interval '1 day'`
+  );
 }
 
-export function deleteUserData(ownerId: string): void {
-  const db = getDb();
+/** Cascade-deletes every row belonging to a user across all tables. */
+export async function deleteUserData(ownerId: string): Promise<void> {
   const tables = [
     'documents',
     'chat_threads',
@@ -443,31 +506,32 @@ export function deleteUserData(ownerId: string): void {
     'activity_events',
     'auth_tokens',
   ];
-  const tx = db.transaction(() => {
-    // chat_messages/thread_summaries are keyed by thread; delete via threads first.
-    const threadIds = (
-      db.prepare('SELECT id FROM chat_threads WHERE owner_id = ?').all(ownerId) as { id: string }[]
-    ).map((r) => r.id);
-    const delMsgs = db.prepare('DELETE FROM chat_messages WHERE thread_id = ?');
-    const delSummary = db.prepare('DELETE FROM thread_summaries WHERE thread_id = ?');
-    for (const tid of threadIds) {
-      delMsgs.run(tid);
-      delSummary.run(tid);
-    }
 
+  await transaction(async (client) => {
+    // chat_messages/thread_summaries are keyed by thread, not owner — clear
+    // them via the owner's threads before the threads themselves go.
+    await client.query(
+      `DELETE FROM chat_messages
+       WHERE thread_id IN (SELECT id FROM chat_threads WHERE owner_id = $1)`,
+      [ownerId]
+    );
+    await client.query(
+      `DELETE FROM thread_summaries
+       WHERE thread_id IN (SELECT id FROM chat_threads WHERE owner_id = $1)`,
+      [ownerId]
+    );
     for (const table of tables) {
-      db.prepare(`DELETE FROM ${table} WHERE owner_id = ?`).run(ownerId);
+      await client.query(`DELETE FROM ${table} WHERE owner_id = $1`, [ownerId]);
     }
-    db.prepare('DELETE FROM users WHERE id = ?').run(ownerId);
+    await client.query('DELETE FROM users WHERE id = $1', [ownerId]);
   });
-  tx();
 }
 
 // ---------------------------------------------------------------------------
 // Documents
 // ---------------------------------------------------------------------------
 
-export function insertDocument(doc: {
+export async function insertDocument(doc: {
   id: string;
   ownerId: string;
   filename: string;
@@ -476,141 +540,127 @@ export function insertDocument(doc: {
   status?: string;
   chunkCount?: number;
   error?: string | null;
-}): DocumentRecord {
-  const db = getDb();
-  db.prepare(
+}): Promise<DocumentRecord> {
+  const row = await queryOne<DocumentRow>(
     `INSERT INTO documents (id, owner_id, filename, mime_type, size_bytes, status, chunk_count, error)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run(
-    doc.id,
-    doc.ownerId,
-    doc.filename,
-    doc.mimeType,
-    doc.sizeBytes,
-    doc.status ?? 'processing',
-    doc.chunkCount ?? 0,
-    doc.error ?? null
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+     RETURNING *`,
+    [
+      doc.id,
+      doc.ownerId,
+      doc.filename,
+      doc.mimeType,
+      doc.sizeBytes,
+      doc.status ?? 'processing',
+      doc.chunkCount ?? 0,
+      doc.error ?? null,
+    ]
   );
-  const created = getDocumentById(doc.id);
-  if (!created) {
-    throw new Error('Failed to read back created document');
-  }
-  return created;
+  if (!row) throw new Error('Failed to read back created document');
+  return mapDocumentRow(row);
 }
 
-export function updateDocumentStatus(
+export async function updateDocumentStatus(
   id: string,
   status: DocumentRecord['status'],
   chunkCount?: number,
   error?: string | null
-): void {
-  const db = getDb();
+): Promise<void> {
   if (chunkCount !== undefined) {
-    db.prepare(
-      `UPDATE documents SET status = ?, chunk_count = ?, error = ? WHERE id = ?`
-    ).run(status, chunkCount, error ?? null, id);
+    await query('UPDATE documents SET status = $1, chunk_count = $2, error = $3 WHERE id = $4', [
+      status,
+      chunkCount,
+      error ?? null,
+      id,
+    ]);
   } else {
-    db.prepare(`UPDATE documents SET status = ?, error = ? WHERE id = ?`).run(
+    await query('UPDATE documents SET status = $1, error = $2 WHERE id = $3', [
       status,
       error ?? null,
-      id
-    );
+      id,
+    ]);
   }
 }
 
-export function listDocumentsByOwner(ownerId: string): DocumentRecord[] {
-  const db = getDb();
-  const rows = db
-    .prepare('SELECT * FROM documents WHERE owner_id = ? ORDER BY created_at DESC')
-    .all(ownerId) as DocumentRow[];
+export async function listDocumentsByOwner(ownerId: string): Promise<DocumentRecord[]> {
+  const rows = await query<DocumentRow>(
+    'SELECT * FROM documents WHERE owner_id = $1 ORDER BY created_at DESC',
+    [ownerId]
+  );
   return rows.map(mapDocumentRow);
 }
 
-export function getDocumentById(id: string): DocumentRecord | null {
-  const db = getDb();
-  const row = db.prepare('SELECT * FROM documents WHERE id = ?').get(id) as
-    | DocumentRow
-    | undefined;
+export async function getDocumentById(id: string): Promise<DocumentRecord | null> {
+  const row = await queryOne<DocumentRow>('SELECT * FROM documents WHERE id = $1', [id]);
   return row ? mapDocumentRow(row) : null;
 }
 
-export function deleteDocument(id: string): void {
-  const db = getDb();
-  db.prepare('DELETE FROM documents WHERE id = ?').run(id);
+export async function deleteDocument(id: string): Promise<void> {
+  await query('DELETE FROM documents WHERE id = $1', [id]);
 }
 
 // ---------------------------------------------------------------------------
 // Chat threads / messages
 // ---------------------------------------------------------------------------
 
-export function createChatThread(thread: {
+export async function createChatThread(thread: {
   id: string;
   ownerId: string;
   title?: string | null;
-}): ChatThreadRecord {
-  const db = getDb();
-  db.prepare(
-    `INSERT INTO chat_threads (id, owner_id, title) VALUES (?, ?, ?)`
-  ).run(thread.id, thread.ownerId, thread.title ?? null);
-  const row = db
-    .prepare('SELECT * FROM chat_threads WHERE id = ?')
-    .get(thread.id) as ChatThreadRow;
+}): Promise<ChatThreadRecord> {
+  const row = await queryOne<ChatThreadRow>(
+    `INSERT INTO chat_threads (id, owner_id, title) VALUES ($1, $2, $3) RETURNING *`,
+    [thread.id, thread.ownerId, thread.title ?? null]
+  );
+  if (!row) throw new Error('Failed to read back created thread');
   return mapChatThreadRow(row);
 }
 
-export function getChatThread(id: string): ChatThreadRecord | null {
-  const db = getDb();
-  const row = db.prepare('SELECT * FROM chat_threads WHERE id = ?').get(id) as
-    | ChatThreadRow
-    | undefined;
+export async function getChatThread(id: string): Promise<ChatThreadRecord | null> {
+  const row = await queryOne<ChatThreadRow>('SELECT * FROM chat_threads WHERE id = $1', [id]);
   return row ? mapChatThreadRow(row) : null;
 }
 
 /** Lists a user's threads, pinned first, then most-recently-updated. */
-export function listChatThreads(ownerId: string): ChatThreadRecord[] {
-  const db = getDb();
-  const rows = db
-    .prepare(
-      `SELECT * FROM chat_threads WHERE owner_id = ? ORDER BY pinned DESC, updated_at DESC`
-    )
-    .all(ownerId) as ChatThreadRow[];
+export async function listChatThreads(ownerId: string): Promise<ChatThreadRecord[]> {
+  const rows = await query<ChatThreadRow>(
+    'SELECT * FROM chat_threads WHERE owner_id = $1 ORDER BY pinned DESC, updated_at DESC',
+    [ownerId]
+  );
   return rows.map(mapChatThreadRow);
 }
 
-export function updateChatThread(
+export async function updateChatThread(
   id: string,
   updates: { title?: string; pinned?: boolean }
-): void {
-  const db = getDb();
+): Promise<void> {
   if (updates.title !== undefined) {
-    db.prepare(`UPDATE chat_threads SET title = ?, updated_at = datetime('now') WHERE id = ?`).run(
+    await query('UPDATE chat_threads SET title = $1, updated_at = now() WHERE id = $2', [
       updates.title,
-      id
-    );
+      id,
+    ]);
   }
   if (updates.pinned !== undefined) {
-    db.prepare(`UPDATE chat_threads SET pinned = ?, updated_at = datetime('now') WHERE id = ?`).run(
-      updates.pinned ? 1 : 0,
-      id
-    );
+    await query('UPDATE chat_threads SET pinned = $1, updated_at = now() WHERE id = $2', [
+      updates.pinned,
+      id,
+    ]);
   }
 }
 
-export function touchChatThread(id: string): void {
-  const db = getDb();
-  db.prepare(`UPDATE chat_threads SET updated_at = datetime('now') WHERE id = ?`).run(id);
+export async function touchChatThread(id: string): Promise<void> {
+  await query('UPDATE chat_threads SET updated_at = now() WHERE id = $1', [id]);
 }
 
-export function deleteChatThread(id: string): void {
-  const db = getDb();
-  const tx = db.transaction(() => {
-    db.prepare('DELETE FROM chat_messages WHERE thread_id = ?').run(id);
-    db.prepare('DELETE FROM chat_threads WHERE id = ?').run(id);
+export async function deleteChatThread(id: string): Promise<void> {
+  await transaction(async (client) => {
+    await client.query('DELETE FROM chat_messages WHERE thread_id = $1', [id]);
+    await client.query('DELETE FROM thread_summaries WHERE thread_id = $1', [id]);
+    await client.query('DELETE FROM chat_threads WHERE id = $1', [id]);
   });
-  tx();
 }
 
-export function insertChatMessage(msg: {
+export async function insertChatMessage(msg: {
   id: string;
   threadId: string;
   role: 'system' | 'user' | 'assistant';
@@ -618,57 +668,58 @@ export function insertChatMessage(msg: {
   metaJson?: string | null;
   tokenCount?: number;
   documentRefs?: string | null;
-}): ChatMessageRecord {
-  const db = getDb();
-  db.prepare(
-    `INSERT INTO chat_messages (id, thread_id, role, content, meta_json, token_count, document_refs)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`
-  ).run(
-    msg.id,
-    msg.threadId,
-    msg.role,
-    msg.content,
-    msg.metaJson ?? null,
-    msg.tokenCount ?? 0,
-    msg.documentRefs ?? null
-  );
-  db.prepare(`UPDATE chat_threads SET updated_at = datetime('now') WHERE id = ?`).run(msg.threadId);
-  const row = db
-    .prepare('SELECT * FROM chat_messages WHERE id = ?')
-    .get(msg.id) as ChatMessageRow;
-  return mapChatMessageRow(row);
+}): Promise<ChatMessageRecord> {
+  return transaction(async (client) => {
+    const { rows } = await client.query(
+      `INSERT INTO chat_messages (id, thread_id, role, content, meta_json, token_count, document_refs)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING *`,
+      [
+        msg.id,
+        msg.threadId,
+        msg.role,
+        msg.content,
+        msg.metaJson ?? null,
+        msg.tokenCount ?? 0,
+        msg.documentRefs ?? null,
+      ]
+    );
+    await client.query('UPDATE chat_threads SET updated_at = now() WHERE id = $1', [msg.threadId]);
+    return mapChatMessageRow(rows[0] as ChatMessageRow);
+  });
 }
 
 /** All messages for a thread, oldest -> newest (for rendering a full thread). */
-export function listThreadMessages(threadId: string): ChatMessageRecord[] {
-  const db = getDb();
-  const rows = db
-    .prepare('SELECT * FROM chat_messages WHERE thread_id = ? ORDER BY created_at ASC')
-    .all(threadId) as ChatMessageRow[];
+export async function listThreadMessages(threadId: string): Promise<ChatMessageRecord[]> {
+  const rows = await query<ChatMessageRow>(
+    'SELECT * FROM chat_messages WHERE thread_id = $1 ORDER BY created_at ASC',
+    [threadId]
+  );
   return rows.map(mapChatMessageRow);
 }
 
 /**
- * Returns the last `limit` messages for a thread ordered oldest -> newest,
- * suitable for building a "last N exchanges" context window.
+ * The last `limit` messages for a thread, ordered oldest -> newest, for
+ * building a "last N exchanges" context window.
  */
-export function getRecentMessages(threadId: string, limit = 6): ChatMessageRecord[] {
-  const db = getDb();
-  const rows = db
-    .prepare(
-      `SELECT * FROM chat_messages WHERE thread_id = ? ORDER BY created_at DESC LIMIT ?`
-    )
-    .all(threadId, limit) as ChatMessageRow[];
+export async function getRecentMessages(
+  threadId: string,
+  limit = 6
+): Promise<ChatMessageRecord[]> {
+  const rows = await query<ChatMessageRow>(
+    'SELECT * FROM chat_messages WHERE thread_id = $1 ORDER BY created_at DESC LIMIT $2',
+    [threadId, limit]
+  );
   return rows.reverse().map(mapChatMessageRow);
 }
 
 /** Total messages currently stored for a thread (drives summary regeneration). */
-export function countThreadMessages(threadId: string): number {
-  const db = getDb();
-  const row = db
-    .prepare('SELECT COUNT(*) AS n FROM chat_messages WHERE thread_id = ?')
-    .get(threadId) as { n: number };
-  return row.n;
+export async function countThreadMessages(threadId: string): Promise<number> {
+  const row = await queryOne<{ n: number }>(
+    'SELECT COUNT(*)::int AS n FROM chat_messages WHERE thread_id = $1',
+    [threadId]
+  );
+  return toNum(row?.n);
 }
 
 // ---------------------------------------------------------------------------
@@ -682,36 +733,36 @@ export interface ThreadSummaryRecord {
   updatedAt: string;
 }
 
-export function getThreadSummary(threadId: string): ThreadSummaryRecord | null {
-  const db = getDb();
-  const row = db
-    .prepare('SELECT * FROM thread_summaries WHERE thread_id = ?')
-    .get(threadId) as
-    | { thread_id: string; summary: string; through_message_count: number; updated_at: string }
-    | undefined;
+export async function getThreadSummary(threadId: string): Promise<ThreadSummaryRecord | null> {
+  const row = await queryOne<{
+    thread_id: string;
+    summary: string;
+    through_message_count: number;
+    updated_at: Date;
+  }>('SELECT * FROM thread_summaries WHERE thread_id = $1', [threadId]);
   if (!row) return null;
   return {
     threadId: row.thread_id,
     summary: row.summary,
-    throughMessageCount: row.through_message_count,
-    updatedAt: row.updated_at,
+    throughMessageCount: toNum(row.through_message_count),
+    updatedAt: toIso(row.updated_at),
   };
 }
 
-export function upsertThreadSummary(
+export async function upsertThreadSummary(
   threadId: string,
   summary: string,
   throughMessageCount: number
-): void {
-  const db = getDb();
-  db.prepare(
+): Promise<void> {
+  await query(
     `INSERT INTO thread_summaries (thread_id, summary, through_message_count, updated_at)
-     VALUES (?, ?, ?, datetime('now'))
-     ON CONFLICT(thread_id) DO UPDATE SET
-       summary = excluded.summary,
-       through_message_count = excluded.through_message_count,
-       updated_at = datetime('now')`
-  ).run(threadId, summary, throughMessageCount);
+     VALUES ($1, $2, $3, now())
+     ON CONFLICT (thread_id) DO UPDATE SET
+       summary = EXCLUDED.summary,
+       through_message_count = EXCLUDED.through_message_count,
+       updated_at = now()`,
+    [threadId, summary, throughMessageCount]
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -734,7 +785,7 @@ export interface AgentActionRecord {
   createdAt: string;
 }
 
-interface AgentActionRow {
+interface AgentActionRow extends Record<string, unknown> {
   id: string;
   thread_id: string;
   owner_id: string;
@@ -744,8 +795,8 @@ interface AgentActionRow {
   status: string;
   result_json: string | null;
   state_json: string | null;
-  decided_at: string | null;
-  created_at: string;
+  decided_at: Date | null;
+  created_at: Date;
 }
 
 function mapAgentActionRow(row: AgentActionRow): AgentActionRecord {
@@ -759,12 +810,12 @@ function mapAgentActionRow(row: AgentActionRow): AgentActionRecord {
     status: row.status as AgentActionStatus,
     resultJson: row.result_json,
     stateJson: row.state_json,
-    decidedAt: row.decided_at,
-    createdAt: row.created_at,
+    decidedAt: toIsoOrNull(row.decided_at),
+    createdAt: toIso(row.created_at),
   };
 }
 
-export function insertAgentAction(action: {
+export async function insertAgentAction(action: {
   id: string;
   threadId: string;
   ownerId: string;
@@ -773,34 +824,32 @@ export function insertAgentAction(action: {
   payloadJson: string;
   status?: AgentActionStatus;
   stateJson?: string | null;
-}): AgentActionRecord {
-  const db = getDb();
-  db.prepare(
+}): Promise<AgentActionRecord> {
+  const row = await queryOne<AgentActionRow>(
     `INSERT INTO agent_actions (id, thread_id, owner_id, tool, summary, payload_json, status, state_json)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run(
-    action.id,
-    action.threadId,
-    action.ownerId,
-    action.tool,
-    action.summary,
-    action.payloadJson,
-    action.status ?? 'proposed',
-    action.stateJson ?? null
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+     RETURNING *`,
+    [
+      action.id,
+      action.threadId,
+      action.ownerId,
+      action.tool,
+      action.summary,
+      action.payloadJson,
+      action.status ?? 'proposed',
+      action.stateJson ?? null,
+    ]
   );
-  const row = db.prepare('SELECT * FROM agent_actions WHERE id = ?').get(action.id) as AgentActionRow;
+  if (!row) throw new Error('Failed to read back created agent action');
   return mapAgentActionRow(row);
 }
 
-export function getAgentAction(id: string): AgentActionRecord | null {
-  const db = getDb();
-  const row = db.prepare('SELECT * FROM agent_actions WHERE id = ?').get(id) as
-    | AgentActionRow
-    | undefined;
+export async function getAgentAction(id: string): Promise<AgentActionRecord | null> {
+  const row = await queryOne<AgentActionRow>('SELECT * FROM agent_actions WHERE id = $1', [id]);
   return row ? mapAgentActionRow(row) : null;
 }
 
-export function updateAgentAction(
+export async function updateAgentAction(
   id: string,
   updates: {
     status?: AgentActionStatus;
@@ -808,30 +857,43 @@ export function updateAgentAction(
     payloadJson?: string;
     decided?: boolean;
   }
-): void {
-  const db = getDb();
+): Promise<void> {
+  // Built as one UPDATE rather than several so a decision lands atomically.
+  const sets: string[] = [];
+  const params: unknown[] = [];
+  let i = 1;
+
   if (updates.status !== undefined) {
-    db.prepare('UPDATE agent_actions SET status = ? WHERE id = ?').run(updates.status, id);
+    sets.push(`status = $${i++}`);
+    params.push(updates.status);
   }
   if (updates.resultJson !== undefined) {
-    db.prepare('UPDATE agent_actions SET result_json = ? WHERE id = ?').run(updates.resultJson, id);
+    sets.push(`result_json = $${i++}`);
+    params.push(updates.resultJson);
   }
   if (updates.payloadJson !== undefined) {
-    db.prepare('UPDATE agent_actions SET payload_json = ? WHERE id = ?').run(updates.payloadJson, id);
+    sets.push(`payload_json = $${i++}`);
+    params.push(updates.payloadJson);
   }
   if (updates.decided) {
-    db.prepare(`UPDATE agent_actions SET decided_at = datetime('now') WHERE id = ?`).run(id);
+    sets.push('decided_at = now()');
   }
+  if (sets.length === 0) return;
+
+  params.push(id);
+  await query(`UPDATE agent_actions SET ${sets.join(', ')} WHERE id = $${i}`, params);
 }
 
-export function listAgentActions(threadId: string, ownerId: string, limit = 100): AgentActionRecord[] {
-  const db = getDb();
-  const rows = db
-    .prepare(
-      `SELECT * FROM agent_actions WHERE thread_id = ? AND owner_id = ?
-       ORDER BY created_at DESC LIMIT ?`
-    )
-    .all(threadId, ownerId, limit) as AgentActionRow[];
+export async function listAgentActions(
+  threadId: string,
+  ownerId: string,
+  limit = 100
+): Promise<AgentActionRecord[]> {
+  const rows = await query<AgentActionRow>(
+    `SELECT * FROM agent_actions WHERE thread_id = $1 AND owner_id = $2
+     ORDER BY created_at DESC LIMIT $3`,
+    [threadId, ownerId, limit]
+  );
   return rows.map(mapAgentActionRow);
 }
 
@@ -850,7 +912,7 @@ export interface UserConnectionRecord {
   createdAt: string;
 }
 
-interface UserConnectionRow {
+interface UserConnectionRow extends Record<string, unknown> {
   id: string;
   owner_id: string;
   service: string;
@@ -858,7 +920,7 @@ interface UserConnectionRow {
   iv: string;
   auth_tag: string;
   label: string;
-  created_at: string;
+  created_at: Date;
 }
 
 function mapConnectionRow(row: UserConnectionRow): UserConnectionRecord {
@@ -870,11 +932,11 @@ function mapConnectionRow(row: UserConnectionRow): UserConnectionRecord {
     iv: row.iv,
     authTag: row.auth_tag,
     label: row.label,
-    createdAt: row.created_at,
+    createdAt: toIso(row.created_at),
   };
 }
 
-export function upsertUserConnection(conn: {
+export async function upsertUserConnection(conn: {
   id: string;
   ownerId: string;
   service: string;
@@ -882,42 +944,44 @@ export function upsertUserConnection(conn: {
   iv: string;
   authTag: string;
   label?: string;
-}): void {
-  const db = getDb();
-  db.prepare(
+}): Promise<void> {
+  await query(
     `INSERT INTO user_connections (id, owner_id, service, ciphertext, iv, auth_tag, label)
-     VALUES (?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT(owner_id, service) DO UPDATE SET
-       ciphertext = excluded.ciphertext,
-       iv = excluded.iv,
-       auth_tag = excluded.auth_tag,
-       label = excluded.label,
-       created_at = datetime('now')`
-  ).run(conn.id, conn.ownerId, conn.service, conn.ciphertext, conn.iv, conn.authTag, conn.label ?? '');
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
+     ON CONFLICT (owner_id, service) DO UPDATE SET
+       ciphertext = EXCLUDED.ciphertext,
+       iv = EXCLUDED.iv,
+       auth_tag = EXCLUDED.auth_tag,
+       label = EXCLUDED.label,
+       created_at = now()`,
+    [conn.id, conn.ownerId, conn.service, conn.ciphertext, conn.iv, conn.authTag, conn.label ?? '']
+  );
 }
 
-export function getUserConnection(ownerId: string, service: string): UserConnectionRecord | null {
-  const db = getDb();
-  const row = db
-    .prepare('SELECT * FROM user_connections WHERE owner_id = ? AND service = ?')
-    .get(ownerId, service) as UserConnectionRow | undefined;
+export async function getUserConnection(
+  ownerId: string,
+  service: string
+): Promise<UserConnectionRecord | null> {
+  const row = await queryOne<UserConnectionRow>(
+    'SELECT * FROM user_connections WHERE owner_id = $1 AND service = $2',
+    [ownerId, service]
+  );
   return row ? mapConnectionRow(row) : null;
 }
 
-export function listUserConnections(ownerId: string): UserConnectionRecord[] {
-  const db = getDb();
-  const rows = db
-    .prepare('SELECT * FROM user_connections WHERE owner_id = ? ORDER BY service')
-    .all(ownerId) as UserConnectionRow[];
+export async function listUserConnections(ownerId: string): Promise<UserConnectionRecord[]> {
+  const rows = await query<UserConnectionRow>(
+    'SELECT * FROM user_connections WHERE owner_id = $1 ORDER BY service',
+    [ownerId]
+  );
   return rows.map(mapConnectionRow);
 }
 
-export function deleteUserConnection(ownerId: string, service: string): void {
-  const db = getDb();
-  db.prepare('DELETE FROM user_connections WHERE owner_id = ? AND service = ?').run(
+export async function deleteUserConnection(ownerId: string, service: string): Promise<void> {
+  await query('DELETE FROM user_connections WHERE owner_id = $1 AND service = $2', [
     ownerId,
-    service
-  );
+    service,
+  ]);
 }
 
 // ---------------------------------------------------------------------------
@@ -925,68 +989,72 @@ export function deleteUserConnection(ownerId: string, service: string): void {
 // ---------------------------------------------------------------------------
 
 /**
- * Returns the cached vectors for the given content hashes as a hash -> vector
- * map. Hashes with no cache entry are simply absent from the map.
+ * Cached vectors for the given content hashes, as a hash -> vector map. Hashes
+ * with no cache entry are simply absent. One query with `= ANY($1)` rather than
+ * a loop, because ingestion looks up hundreds of hashes at a time and a
+ * round-trip each would dominate the request.
  */
-export function getCachedEmbeddings(
+export async function getCachedEmbeddings(
   hashes: string[],
   provider: string,
   model: string
-): Map<string, number[]> {
-  const db = getDb();
+): Promise<Map<string, number[]>> {
   const out = new Map<string, number[]>();
-  const stmt = db.prepare(
-    'SELECT vector_json FROM embedding_cache WHERE content_hash = ? AND provider = ? AND model = ?'
+  if (hashes.length === 0) return out;
+
+  const rows = await query<{ content_hash: string; vector_json: string }>(
+    `SELECT content_hash, vector_json FROM embedding_cache
+     WHERE content_hash = ANY($1::text[]) AND provider = $2 AND model = $3`,
+    [hashes, provider, model]
   );
-  for (const hash of hashes) {
-    const row = stmt.get(hash, provider, model) as { vector_json: string } | undefined;
-    if (row) {
-      try {
-        out.set(hash, JSON.parse(row.vector_json) as number[]);
-      } catch {
-        /* corrupt cache entry — treat as miss */
-      }
+
+  for (const row of rows) {
+    try {
+      out.set(row.content_hash, JSON.parse(row.vector_json) as number[]);
+    } catch {
+      /* corrupt cache entry — treat as a miss */
     }
   }
   return out;
 }
 
-export function putCachedEmbeddings(
+export async function putCachedEmbeddings(
   entries: { hash: string; vector: number[] }[],
   provider: string,
   model: string
-): void {
+): Promise<void> {
   if (entries.length === 0) return;
-  const db = getDb();
-  const stmt = db.prepare(
-    `INSERT INTO embedding_cache (content_hash, provider, model, vector_json)
-     VALUES (?, ?, ?, ?)
-     ON CONFLICT(content_hash, provider, model) DO NOTHING`
-  );
-  const tx = db.transaction((rows: { hash: string; vector: number[] }[]) => {
-    for (const row of rows) stmt.run(row.hash, provider, model, JSON.stringify(row.vector));
+  await transaction(async (client) => {
+    for (const entry of entries) {
+      await client.query(
+        `INSERT INTO embedding_cache (content_hash, provider, model, vector_json)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (content_hash, provider, model) DO NOTHING`,
+        [entry.hash, provider, model, JSON.stringify(entry.vector)]
+      );
+    }
   });
-  tx(entries);
 }
 
 // ---------------------------------------------------------------------------
-// Read-only query execution for the Level 2 NL -> SQL router.
+// Read-only query execution for the NL -> SQL router.
 // ---------------------------------------------------------------------------
 
 /**
- * Executes a single read-only SQL statement with parameters.
+ * Executes a single read-only SQL statement.
  *
- * This intentionally uses `db.prepare(sql).all(params)` rather than
- * `db.exec(sql)`. `better-sqlite3`'s `prepare()` only ever compiles a single
- * SQL statement (it throws if given more than one), which prevents stacked
- * ("SQL injection via multi-statement") queries at the driver level. This
- * function does not itself validate that `sql` is a SELECT / read-only
- * statement — that validation is the responsibility of the NL-to-SQL router
- * module that calls this.
+ * The statement is wrapped in a READ ONLY transaction, so even if the
+ * validation in nlToSql.ts were bypassed, Postgres itself refuses any write —
+ * a guarantee the SQLite original could not make. Multi-statement strings are
+ * rejected by the driver's extended query protocol when parameters are used,
+ * and by the validator regardless.
  */
-export function runReadOnlyQuery(sql: string, params: unknown[] = []): unknown[] {
-  const db = getDb();
-  return db.prepare(sql).all(...params);
+export async function runReadOnlyQuery(sql: string, params: unknown[] = []): Promise<unknown[]> {
+  return transaction(async (client) => {
+    await client.query('SET TRANSACTION READ ONLY');
+    const { rows } = await client.query(sql, params);
+    return rows as unknown[];
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -1006,19 +1074,17 @@ export interface UserPreferences {
   autoApprove: Record<string, boolean>;
 }
 
-export function getUserPreferences(ownerId: string): UserPreferences {
-  const db = getDb();
-  const row = db.prepare('SELECT * FROM user_preferences WHERE owner_id = ?').get(ownerId) as
-    | {
-        owner_id: string;
-        default_provider: string | null;
-        default_model: string | null;
-        default_tone: string | null;
-        theme: string | null;
-        connection_type: string | null;
-        auto_approve_json: string | null;
-      }
-    | undefined;
+export async function getUserPreferences(ownerId: string): Promise<UserPreferences> {
+  const row = await queryOne<{
+    owner_id: string;
+    default_provider: string | null;
+    default_model: string | null;
+    default_tone: string | null;
+    theme: string | null;
+    connection_type: string | null;
+    auto_approve_json: string | null;
+  }>('SELECT * FROM user_preferences WHERE owner_id = $1', [ownerId]);
+
   let autoApprove: Record<string, boolean> = {};
   if (row?.auto_approve_json) {
     try {
@@ -1027,6 +1093,7 @@ export function getUserPreferences(ownerId: string): UserPreferences {
       autoApprove = {};
     }
   }
+
   return {
     ownerId,
     defaultProvider: row?.default_provider ?? null,
@@ -1038,31 +1105,31 @@ export function getUserPreferences(ownerId: string): UserPreferences {
   };
 }
 
-export function upsertUserPreferences(
+export async function upsertUserPreferences(
   ownerId: string,
   prefs: Partial<Omit<UserPreferences, 'ownerId'>>
-): UserPreferences {
-  const db = getDb();
-  const current = getUserPreferences(ownerId);
+): Promise<UserPreferences> {
+  const current = await getUserPreferences(ownerId);
   const next = { ...current, ...prefs };
-  db.prepare(
+  await query(
     `INSERT INTO user_preferences (owner_id, default_provider, default_model, default_tone, theme, connection_type, auto_approve_json)
-     VALUES (?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT(owner_id) DO UPDATE SET
-       default_provider = excluded.default_provider,
-       default_model = excluded.default_model,
-       default_tone = excluded.default_tone,
-       theme = excluded.theme,
-       connection_type = excluded.connection_type,
-       auto_approve_json = excluded.auto_approve_json`
-  ).run(
-    ownerId,
-    next.defaultProvider,
-    next.defaultModel,
-    next.defaultTone,
-    next.theme,
-    next.connectionType,
-    JSON.stringify(next.autoApprove ?? {})
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
+     ON CONFLICT (owner_id) DO UPDATE SET
+       default_provider = EXCLUDED.default_provider,
+       default_model = EXCLUDED.default_model,
+       default_tone = EXCLUDED.default_tone,
+       theme = EXCLUDED.theme,
+       connection_type = EXCLUDED.connection_type,
+       auto_approve_json = EXCLUDED.auto_approve_json`,
+    [
+      ownerId,
+      next.defaultProvider,
+      next.defaultModel,
+      next.defaultTone,
+      next.theme,
+      next.connectionType,
+      JSON.stringify(next.autoApprove ?? {}),
+    ]
   );
   return next;
 }
@@ -1082,7 +1149,7 @@ export interface UserApiKeyRecord {
   createdAt: string;
 }
 
-interface UserApiKeyRow {
+interface UserApiKeyRow extends Record<string, unknown> {
   id: string;
   owner_id: string;
   provider: string;
@@ -1090,7 +1157,7 @@ interface UserApiKeyRow {
   iv: string;
   auth_tag: string;
   key_preview: string;
-  created_at: string;
+  created_at: Date;
 }
 
 function mapApiKeyRow(row: UserApiKeyRow): UserApiKeyRecord {
@@ -1102,11 +1169,11 @@ function mapApiKeyRow(row: UserApiKeyRow): UserApiKeyRecord {
     iv: row.iv,
     authTag: row.auth_tag,
     keyPreview: row.key_preview,
-    createdAt: row.created_at,
+    createdAt: toIso(row.created_at),
   };
 }
 
-export function upsertUserApiKey(key: {
+export async function upsertUserApiKey(key: {
   id: string;
   ownerId: string;
   provider: string;
@@ -1114,39 +1181,44 @@ export function upsertUserApiKey(key: {
   iv: string;
   authTag: string;
   keyPreview: string;
-}): void {
-  const db = getDb();
-  db.prepare(
+}): Promise<void> {
+  await query(
     `INSERT INTO user_api_keys (id, owner_id, provider, ciphertext, iv, auth_tag, key_preview)
-     VALUES (?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT(owner_id, provider) DO UPDATE SET
-       ciphertext = excluded.ciphertext,
-       iv = excluded.iv,
-       auth_tag = excluded.auth_tag,
-       key_preview = excluded.key_preview,
-       created_at = datetime('now')`
-  ).run(key.id, key.ownerId, key.provider, key.ciphertext, key.iv, key.authTag, key.keyPreview);
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
+     ON CONFLICT (owner_id, provider) DO UPDATE SET
+       ciphertext = EXCLUDED.ciphertext,
+       iv = EXCLUDED.iv,
+       auth_tag = EXCLUDED.auth_tag,
+       key_preview = EXCLUDED.key_preview,
+       created_at = now()`,
+    [key.id, key.ownerId, key.provider, key.ciphertext, key.iv, key.authTag, key.keyPreview]
+  );
 }
 
-export function listUserApiKeys(ownerId: string): UserApiKeyRecord[] {
-  const db = getDb();
-  const rows = db
-    .prepare('SELECT * FROM user_api_keys WHERE owner_id = ? ORDER BY provider')
-    .all(ownerId) as UserApiKeyRow[];
+export async function listUserApiKeys(ownerId: string): Promise<UserApiKeyRecord[]> {
+  const rows = await query<UserApiKeyRow>(
+    'SELECT * FROM user_api_keys WHERE owner_id = $1 ORDER BY provider',
+    [ownerId]
+  );
   return rows.map(mapApiKeyRow);
 }
 
-export function getUserApiKey(ownerId: string, provider: string): UserApiKeyRecord | null {
-  const db = getDb();
-  const row = db
-    .prepare('SELECT * FROM user_api_keys WHERE owner_id = ? AND provider = ?')
-    .get(ownerId, provider) as UserApiKeyRow | undefined;
+export async function getUserApiKey(
+  ownerId: string,
+  provider: string
+): Promise<UserApiKeyRecord | null> {
+  const row = await queryOne<UserApiKeyRow>(
+    'SELECT * FROM user_api_keys WHERE owner_id = $1 AND provider = $2',
+    [ownerId, provider]
+  );
   return row ? mapApiKeyRow(row) : null;
 }
 
-export function deleteUserApiKey(ownerId: string, provider: string): void {
-  const db = getDb();
-  db.prepare('DELETE FROM user_api_keys WHERE owner_id = ? AND provider = ?').run(ownerId, provider);
+export async function deleteUserApiKey(ownerId: string, provider: string): Promise<void> {
+  await query('DELETE FROM user_api_keys WHERE owner_id = $1 AND provider = $2', [
+    ownerId,
+    provider,
+  ]);
 }
 
 // ---------------------------------------------------------------------------
@@ -1164,7 +1236,7 @@ export interface GeneratedContentRecord {
   createdAt: string;
 }
 
-interface GeneratedContentRow {
+interface GeneratedContentRow extends Record<string, unknown> {
   id: string;
   owner_id: string;
   document_id: string | null;
@@ -1172,7 +1244,7 @@ interface GeneratedContentRow {
   tone: string;
   channel: string;
   output: string;
-  created_at: string;
+  created_at: Date;
 }
 
 function mapGeneratedContentRow(row: GeneratedContentRow): GeneratedContentRecord {
@@ -1184,11 +1256,11 @@ function mapGeneratedContentRow(row: GeneratedContentRow): GeneratedContentRecor
     tone: row.tone,
     channel: row.channel,
     output: row.output,
-    createdAt: row.created_at,
+    createdAt: toIso(row.created_at),
   };
 }
 
-export function saveGeneratedContent(item: {
+export async function saveGeneratedContent(item: {
   id: string;
   ownerId: string;
   documentId?: string | null;
@@ -1196,58 +1268,57 @@ export function saveGeneratedContent(item: {
   tone: string;
   channel: string;
   output: string;
-}): void {
-  const db = getDb();
-  db.prepare(
+}): Promise<void> {
+  await query(
     `INSERT INTO generated_content (id, owner_id, document_id, content_type, tone, channel, output)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`
-  ).run(
-    item.id,
-    item.ownerId,
-    item.documentId ?? null,
-    item.contentType,
-    item.tone,
-    item.channel,
-    item.output
+     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+    [
+      item.id,
+      item.ownerId,
+      item.documentId ?? null,
+      item.contentType,
+      item.tone,
+      item.channel,
+      item.output,
+    ]
   );
 }
 
-export function listGeneratedContent(ownerId: string): GeneratedContentRecord[] {
-  const db = getDb();
-  const rows = db
-    .prepare('SELECT * FROM generated_content WHERE owner_id = ? ORDER BY created_at DESC')
-    .all(ownerId) as GeneratedContentRow[];
+export async function listGeneratedContent(ownerId: string): Promise<GeneratedContentRecord[]> {
+  const rows = await query<GeneratedContentRow>(
+    'SELECT * FROM generated_content WHERE owner_id = $1 ORDER BY created_at DESC',
+    [ownerId]
+  );
   return rows.map(mapGeneratedContentRow);
 }
 
-export function deleteGeneratedContent(id: string, ownerId: string): void {
-  const db = getDb();
-  db.prepare('DELETE FROM generated_content WHERE id = ? AND owner_id = ?').run(id, ownerId);
+export async function deleteGeneratedContent(id: string, ownerId: string): Promise<void> {
+  await query('DELETE FROM generated_content WHERE id = $1 AND owner_id = $2', [id, ownerId]);
 }
 
 // ---------------------------------------------------------------------------
 // Usage / logs / activity (observability + dashboard)
 // ---------------------------------------------------------------------------
 
-export function recordUsage(event: {
+export async function recordUsage(event: {
   id: string;
   ownerId: string;
   provider: string;
   kind: 'chat' | 'embed' | 'generate';
   promptTokens?: number;
   completionTokens?: number;
-}): void {
-  const db = getDb();
-  db.prepare(
+}): Promise<void> {
+  await query(
     `INSERT INTO usage_events (id, owner_id, provider, kind, prompt_tokens, completion_tokens)
-     VALUES (?, ?, ?, ?, ?, ?)`
-  ).run(
-    event.id,
-    event.ownerId,
-    event.provider,
-    event.kind,
-    event.promptTokens ?? 0,
-    event.completionTokens ?? 0
+     VALUES ($1, $2, $3, $4, $5, $6)`,
+    [
+      event.id,
+      event.ownerId,
+      event.provider,
+      event.kind,
+      event.promptTokens ?? 0,
+      event.completionTokens ?? 0,
+    ]
   );
 }
 
@@ -1255,75 +1326,93 @@ export interface UsageSummary {
   totalPromptTokens: number;
   totalCompletionTokens: number;
   totalRequests: number;
-  byProvider: { provider: string; promptTokens: number; completionTokens: number; requests: number }[];
+  byProvider: {
+    provider: string;
+    promptTokens: number;
+    completionTokens: number;
+    requests: number;
+  }[];
 }
 
-export function getUsageSummary(ownerId: string): UsageSummary {
-  const db = getDb();
-  const totals = db
-    .prepare(
-      `SELECT COALESCE(SUM(prompt_tokens),0) AS p, COALESCE(SUM(completion_tokens),0) AS c, COUNT(*) AS n
-       FROM usage_events WHERE owner_id = ?`
-    )
-    .get(ownerId) as { p: number; c: number; n: number };
-  const byProvider = db
-    .prepare(
-      `SELECT provider, COALESCE(SUM(prompt_tokens),0) AS p, COALESCE(SUM(completion_tokens),0) AS c, COUNT(*) AS n
-       FROM usage_events WHERE owner_id = ? GROUP BY provider ORDER BY n DESC`
-    )
-    .all(ownerId) as { provider: string; p: number; c: number; n: number }[];
+export async function getUsageSummary(ownerId: string): Promise<UsageSummary> {
+  const totals = await queryOne<{ p: string; c: string; n: number }>(
+    `SELECT COALESCE(SUM(prompt_tokens),0) AS p,
+            COALESCE(SUM(completion_tokens),0) AS c,
+            COUNT(*)::int AS n
+     FROM usage_events WHERE owner_id = $1`,
+    [ownerId]
+  );
+  const byProvider = await query<{ provider: string; p: string; c: string; n: number }>(
+    `SELECT provider,
+            COALESCE(SUM(prompt_tokens),0) AS p,
+            COALESCE(SUM(completion_tokens),0) AS c,
+            COUNT(*)::int AS n
+     FROM usage_events WHERE owner_id = $1 GROUP BY provider ORDER BY n DESC`,
+    [ownerId]
+  );
+
   return {
-    totalPromptTokens: totals.p,
-    totalCompletionTokens: totals.c,
-    totalRequests: totals.n,
+    // SUM() over an integer column returns BIGINT, which node-postgres hands
+    // back as a string to avoid precision loss — coerce rather than ship "0".
+    totalPromptTokens: toNum(totals?.p),
+    totalCompletionTokens: toNum(totals?.c),
+    totalRequests: toNum(totals?.n),
     byProvider: byProvider.map((r) => ({
       provider: r.provider,
-      promptTokens: r.p,
-      completionTokens: r.c,
-      requests: r.n,
+      promptTokens: toNum(r.p),
+      completionTokens: toNum(r.c),
+      requests: toNum(r.n),
     })),
   };
 }
 
-export function recordRequestLog(log: {
+export async function recordRequestLog(log: {
   id: string;
   ownerId: string;
   route: string;
   status: number;
   latencyMs?: number;
   provider?: string | null;
-}): void {
-  const db = getDb();
-  db.prepare(
+}): Promise<void> {
+  await query(
     `INSERT INTO request_logs (id, owner_id, route, status, latency_ms, provider)
-     VALUES (?, ?, ?, ?, ?, ?)`
-  ).run(log.id, log.ownerId, log.route, log.status, log.latencyMs ?? 0, log.provider ?? null);
+     VALUES ($1, $2, $3, $4, $5, $6)`,
+    [log.id, log.ownerId, log.route, log.status, log.latencyMs ?? 0, log.provider ?? null]
+  );
 }
 
-export function recordErrorLog(log: {
+export async function recordErrorLog(log: {
   id: string;
   ownerId: string;
   route: string;
   message: string;
-}): void {
-  const db = getDb();
-  db.prepare(
-    `INSERT INTO error_logs (id, owner_id, route, message) VALUES (?, ?, ?, ?)`
-  ).run(log.id, log.ownerId, log.route, log.message);
+}): Promise<void> {
+  await query(
+    'INSERT INTO error_logs (id, owner_id, route, message) VALUES ($1, $2, $3, $4)',
+    [log.id, log.ownerId, log.route, log.message]
+  );
 }
 
-export function listRequestLogs(ownerId: string, limit = 50): Array<Record<string, unknown>> {
-  const db = getDb();
-  return db
-    .prepare('SELECT * FROM request_logs WHERE owner_id = ? ORDER BY created_at DESC LIMIT ?')
-    .all(ownerId, limit) as Array<Record<string, unknown>>;
+export async function listRequestLogs(
+  ownerId: string,
+  limit = 50
+): Promise<Array<Record<string, unknown>>> {
+  const rows = await query(
+    'SELECT * FROM request_logs WHERE owner_id = $1 ORDER BY created_at DESC LIMIT $2',
+    [ownerId, limit]
+  );
+  return rows.map((r) => ({ ...r, created_at: toIso(r.created_at) }));
 }
 
-export function listErrorLogs(ownerId: string, limit = 50): Array<Record<string, unknown>> {
-  const db = getDb();
-  return db
-    .prepare('SELECT * FROM error_logs WHERE owner_id = ? ORDER BY created_at DESC LIMIT ?')
-    .all(ownerId, limit) as Array<Record<string, unknown>>;
+export async function listErrorLogs(
+  ownerId: string,
+  limit = 50
+): Promise<Array<Record<string, unknown>>> {
+  const rows = await query(
+    'SELECT * FROM error_logs WHERE owner_id = $1 ORDER BY created_at DESC LIMIT $2',
+    [ownerId, limit]
+  );
+  return rows.map((r) => ({ ...r, created_at: toIso(r.created_at) }));
 }
 
 export interface ActivityEvent {
@@ -1334,50 +1423,109 @@ export interface ActivityEvent {
   createdAt: string;
 }
 
-export function recordActivity(event: {
+export async function recordActivity(event: {
   id: string;
   ownerId: string;
   type: string;
   summary: string;
-}): void {
-  const db = getDb();
-  db.prepare(
-    `INSERT INTO activity_events (id, owner_id, type, summary) VALUES (?, ?, ?, ?)`
-  ).run(event.id, event.ownerId, event.type, event.summary);
+}): Promise<void> {
+  await query(
+    'INSERT INTO activity_events (id, owner_id, type, summary) VALUES ($1, $2, $3, $4)',
+    [event.id, event.ownerId, event.type, event.summary]
+  );
 }
 
-export function listActivity(ownerId: string, limit = 20): ActivityEvent[] {
-  const db = getDb();
-  const rows = db
-    .prepare('SELECT * FROM activity_events WHERE owner_id = ? ORDER BY created_at DESC LIMIT ?')
-    .all(ownerId, limit) as {
+export async function listActivity(ownerId: string, limit = 20): Promise<ActivityEvent[]> {
+  const rows = await query<{
     id: string;
     owner_id: string;
     type: string;
     summary: string;
-    created_at: string;
-  }[];
+    created_at: Date;
+  }>('SELECT * FROM activity_events WHERE owner_id = $1 ORDER BY created_at DESC LIMIT $2', [
+    ownerId,
+    limit,
+  ]);
   return rows.map((r) => ({
     id: r.id,
     ownerId: r.owner_id,
     type: r.type,
     summary: r.summary,
-    createdAt: r.created_at,
+    createdAt: toIso(r.created_at),
   }));
 }
 
-export function countDocuments(ownerId: string): number {
-  const db = getDb();
-  const row = db
-    .prepare('SELECT COUNT(*) AS n FROM documents WHERE owner_id = ?')
-    .get(ownerId) as { n: number };
-  return row.n;
+export async function countDocuments(ownerId: string): Promise<number> {
+  const row = await queryOne<{ n: number }>(
+    'SELECT COUNT(*)::int AS n FROM documents WHERE owner_id = $1',
+    [ownerId]
+  );
+  return toNum(row?.n);
 }
 
-export function countGeneratedContent(ownerId: string): number {
-  const db = getDb();
-  const row = db
-    .prepare('SELECT COUNT(*) AS n FROM generated_content WHERE owner_id = ?')
-    .get(ownerId) as { n: number };
-  return row.n;
+export async function countGeneratedContent(ownerId: string): Promise<number> {
+  const row = await queryOne<{ n: number }>(
+    'SELECT COUNT(*)::int AS n FROM generated_content WHERE owner_id = $1',
+    [ownerId]
+  );
+  return toNum(row?.n);
+}
+
+// ---------------------------------------------------------------------------
+// Distributed rate limiting
+// ---------------------------------------------------------------------------
+
+export interface RateLimitRow {
+  allowed: boolean;
+  remaining: number;
+  resetAt: number;
+}
+
+/**
+ * Atomically increments a bucket and reports whether the caller is within the
+ * limit.
+ *
+ * The whole decision happens in one statement so concurrent requests — which on
+ * a serverless platform land in *different processes* — cannot both read a
+ * stale count and both be allowed. The upsert either starts a fresh window
+ * (when the stored one has aged out) or increments the current one.
+ */
+export async function consumeRateLimit(
+  bucketKey: string,
+  limit: number,
+  windowMs: number
+): Promise<RateLimitRow> {
+  const windowSeconds = Math.max(1, Math.round(windowMs / 1000));
+
+  const row = await queryOne<{ hits: number; window_start: Date }>(
+    `INSERT INTO rate_limits (bucket_key, hits, window_start)
+     VALUES ($1, 1, now())
+     ON CONFLICT (bucket_key) DO UPDATE SET
+       hits = CASE
+                WHEN rate_limits.window_start < now() - make_interval(secs => $2::double precision)
+                THEN 1
+                ELSE rate_limits.hits + 1
+              END,
+       window_start = CASE
+                        WHEN rate_limits.window_start < now() - make_interval(secs => $2::double precision)
+                        THEN now()
+                        ELSE rate_limits.window_start
+                      END
+     RETURNING hits, window_start`,
+    [bucketKey, windowSeconds]
+  );
+
+  const hits = toNum(row?.hits);
+  const windowStart = row?.window_start instanceof Date ? row.window_start.getTime() : Date.now();
+
+  return {
+    allowed: hits <= limit,
+    remaining: Math.max(0, limit - hits),
+    resetAt: windowStart + windowMs,
+  };
+}
+
+/** Housekeeping: drop buckets whose window closed over a day ago. */
+export async function purgeStaleRateLimits(): Promise<void> {
+  await query(`DELETE FROM rate_limits WHERE window_start < now() - interval '1 day'`);
 }

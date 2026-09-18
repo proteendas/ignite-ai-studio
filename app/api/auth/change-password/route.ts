@@ -18,7 +18,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
-    const rate = checkRateLimit(`user:${session.user.id}:change-password`, {
+    const rate = await checkRateLimit(`user:${session.user.id}:change-password`, {
       limit: 5,
       windowMs: 60_000,
     });
@@ -41,7 +41,7 @@ export async function POST(req: NextRequest) {
 
     const { currentPassword, newPassword } = parsed.data;
 
-    const user = getUserById(session.user.id);
+    const user = await getUserById(session.user.id);
     if (!user) {
       return NextResponse.json({ error: 'User not found.' }, { status: 404 });
     }
@@ -62,7 +62,7 @@ export async function POST(req: NextRequest) {
     }
 
     const newHash = await hashPassword(newPassword);
-    updateUserPassword(user.id, newHash);
+    await updateUserPassword(user.id, newHash);
 
     return NextResponse.json({ ok: true });
   } catch (err) {

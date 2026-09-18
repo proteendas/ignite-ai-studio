@@ -3,19 +3,31 @@
 ## Local loop
 
 ```bash
-npm install          # Node 20 LTS; see the note below
-npm run dev          # http://localhost:3000
-npm run typecheck    # tsc --noEmit
-npm run build        # full production build
+docker compose up -d postgres   # a Postgres with pgvector on :5432
+npm install                     # no native deps — pg is pure JavaScript
+npm run dev                     # http://localhost:3000
+npm run typecheck               # tsc --noEmit
+npm run build                   # full production build
 ```
 
-> **`better-sqlite3` native build.** On Node 24+ no prebuilt binary exists and `node-gyp` may
-> fail, which rolls back the entire install. Use **Node 20 LTS**. If you only need to typecheck,
-> `npm install --ignore-scripts` skips the native build — enough for `tsc`, not enough to run
-> the app.
+Set `DATABASE_URL` in `.env.local` (see [getting started](./getting-started.md)). The app creates
+its own tables on first request — there is no migration command.
 
-There is **no test suite**. `npm run typecheck` and `npm run build` are the gate; both must pass
-before committing. The build catches server/client boundary errors that `tsc` alone will not.
+### Verifying a change
+
+```bash
+npm run typecheck    # types
+npm run build        # catches server/client boundary errors tsc misses
+npm run verify:db    # integration check against a real Postgres
+```
+
+`verify:db` needs `DATABASE_URL` pointing at a pgvector-capable Postgres
+(`docker compose up -d postgres` provides one). It exercises what a typecheck cannot: schema
+bootstrap and its idempotency, driver type coercion, pgvector similarity ranking and owner
+isolation, single-use token redemption under concurrency, the atomicity of the rate limiter, and
+that `READ ONLY` transactions really do refuse writes.
+
+There is no unit-test suite; these three commands are the gate.
 
 ## Conventions
 
@@ -40,18 +52,29 @@ before committing. The build catches server/client boundary errors that `tsc` al
 
 **API routes**
 - Session check → rate limit → validate → authorise → act.
+- `checkRateLimit` is **async** — always `await` it.
 - Return `{ error: string }` with a human-readable message.
 - Return 404, not 403, for resources owned by someone else.
+- Long-running routes need `export const maxDuration = N` or they hit the serverless default.
+
+**Database access**
+- Every function in `lib/db/sql/client.ts` is async; go through `query()`, `queryOne()` or
+  `transaction()` so schema bootstrap is awaited for you.
+- Postgres placeholders are `$1, $2, …`, not `?`.
+- Multi-statement work belongs in `transaction()`, not several sequential `query()` calls.
 
 ## Common tasks
 
 ### Adding a database column
 Two places, always:
-1. The `CREATE TABLE` in [`schema.sql`](../lib/db/sql/schema.sql) — for fresh databases.
-2. An `ensureColumn(...)` in `migrateExistingTables()` in
+1. The `CREATE TABLE` in [`schema.ts`](../lib/db/sql/schema.ts) — for fresh databases.
+2. An `ALTER TABLE … ADD COLUMN IF NOT EXISTS` in `migrateExistingTables()` in
    [`client.ts`](../lib/db/sql/client.ts) — for deployed ones.
 
 Miss the second and existing databases silently lack the column.
+
+Remember that `node-postgres` returns `TIMESTAMPTZ` as a `Date` and `BIGINT` (including `SUM()`
+over an integer) as a **string** — run new columns through `toIso()` / `toNum()` in the mapper.
 
 ### Adding an owner-scoped table
 Do the above, **and** add the table to the list in `deleteUserData()`, or account deletion
@@ -98,7 +121,7 @@ disagree, `docs/` is what a reader should trust — and the disagreement is wort
 - [ ] `npm run typecheck` passes
 - [ ] `npm run build` passes
 - [ ] New env vars documented in `.env.example` and `docs/configuration.md`
-- [ ] New DB columns added in **both** `schema.sql` and `migrateExistingTables()`
+- [ ] New DB columns added in **both** `schema.ts` and `migrateExistingTables()`
 - [ ] New owner-scoped tables added to `deleteUserData()`
 - [ ] New public routes added to `PUBLIC_PREFIXES`
 - [ ] UI works in light *and* dark, and at phone width

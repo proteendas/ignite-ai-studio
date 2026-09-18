@@ -40,7 +40,7 @@ export async function GET() {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
-  const keys: PublicApiKey[] = listUserApiKeys(session.user.id).map((k) => ({
+  const keys: PublicApiKey[] = (await listUserApiKeys(session.user.id)).map((k) => ({
     provider: k.provider,
     keyPreview: k.keyPreview,
     createdAt: k.createdAt,
@@ -95,7 +95,7 @@ export async function POST(req: NextRequest) {
   const { ciphertext, iv, authTag } = encryptSecret(apiKey);
   const keyPreview = maskSecret(apiKey);
 
-  upsertUserApiKey({
+  await upsertUserApiKey({
     id: uuidv4(),
     ownerId: session.user.id,
     provider: body.provider,

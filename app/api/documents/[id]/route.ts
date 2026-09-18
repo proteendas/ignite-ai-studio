@@ -10,7 +10,7 @@ export async function GET(_req: NextRequest, { params }: { params: { id: string 
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
-  const doc = getDocumentById(params.id);
+  const doc = await getDocumentById(params.id);
   if (!doc || doc.ownerId !== session.user.id) {
     return NextResponse.json({ error: 'Document not found.' }, { status: 404 });
   }
@@ -24,14 +24,14 @@ export async function DELETE(_req: NextRequest, { params }: { params: { id: stri
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
-  const doc = getDocumentById(params.id);
+  const doc = await getDocumentById(params.id);
   if (!doc || doc.ownerId !== session.user.id) {
     return NextResponse.json({ error: 'Document not found.' }, { status: 404 });
   }
 
   const vectorStore = getVectorStore();
   await vectorStore.deleteDocument(params.id);
-  deleteDocument(params.id);
+  await deleteDocument(params.id);
 
   return NextResponse.json({ ok: true });
 }

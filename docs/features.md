@@ -6,13 +6,16 @@ What the product does, from a user's point of view.
 
 Upload PDF, DOCX, TXT or Markdown at `/documents`. Each upload runs the ingestion pipeline:
 parse → sanitize → chunk → embed → store. A document moves through `processing` → `ready`, or
-`failed` with the reason attached.
+`failed` with the reason attached. Chunks and their embeddings are written to `document_chunks`
+in Postgres via pgvector.
 
 - **Chatting is blocked until a document is `ready`.** An answer is never built on a
   half-indexed file; the chat endpoint returns 409 if you try.
 - **Scanned PDFs with no text layer produce zero chunks.** The app does not do OCR — run the
   file through OCR first.
 - Deleting a document also removes its embedded chunks from the vector store.
+- Ingestion runs inline, so very large documents can exceed a serverless function's time limit.
+  On a VM there is no such ceiling.
 
 ## Chat
 

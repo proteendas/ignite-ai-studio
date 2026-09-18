@@ -22,6 +22,6 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: 'threadId query parameter is required.' }, { status: 400 });
   }
 
-  const actions = listAgentActions(threadId, session.user.id).map(mapActionToView);
+  const actions = (await listAgentActions(threadId, session.user.id)).map(mapActionToView);
   return NextResponse.json({ actions });
 }

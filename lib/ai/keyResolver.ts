@@ -35,7 +35,7 @@ export type ResolvedKeys = Partial<Record<ProviderId, string>>;
  *
  * `userId` omitted (or encryption not configured) → env keys only.
  */
-export function resolveProviderKeys(userId?: string): ResolvedKeys {
+export async function resolveProviderKeys(userId?: string): Promise<ResolvedKeys> {
   const keys: ResolvedKeys = {};
 
   for (const [provider, envVar] of Object.entries(PROVIDER_ENV_KEY) as [ProviderId, string][]) {
@@ -44,7 +44,7 @@ export function resolveProviderKeys(userId?: string): ResolvedKeys {
   }
 
   if (userId && isEncryptionConfigured()) {
-    for (const rec of listUserApiKeys(userId)) {
+    for (const rec of await listUserApiKeys(userId)) {
       if (!(rec.provider in PROVIDER_ENV_KEY)) continue;
       try {
         keys[rec.provider as ProviderId] = decryptSecret({
@@ -63,9 +63,12 @@ export function resolveProviderKeys(userId?: string): ResolvedKeys {
 }
 
 /** Resolves a single provider's effective key (user key preferred, else env). */
-export function resolveKeyForProvider(provider: ProviderId, userId?: string): string | undefined {
+export async function resolveKeyForProvider(
+  provider: ProviderId,
+  userId?: string
+): Promise<string | undefined> {
   if (userId && isEncryptionConfigured()) {
-    const rec = getUserApiKey(userId, provider);
+    const rec = await getUserApiKey(userId, provider);
     if (rec) {
       try {
         return decryptSecret({ ciphertext: rec.ciphertext, iv: rec.iv, authTag: rec.authTag });

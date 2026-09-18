@@ -22,12 +22,12 @@ export async function GET(_req: NextRequest, { params }: { params: { id: string 
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
-  const thread = getChatThread(params.id);
+  const thread = await getChatThread(params.id);
   if (!thread || thread.ownerId !== session.user.id) {
     return NextResponse.json({ error: 'Thread not found.' }, { status: 404 });
   }
 
-  const messages = listThreadMessages(params.id);
+  const messages = await listThreadMessages(params.id);
   return NextResponse.json({ thread, messages });
 }
 
@@ -38,7 +38,7 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
-  const thread = getChatThread(params.id);
+  const thread = await getChatThread(params.id);
   if (!thread || thread.ownerId !== session.user.id) {
     return NextResponse.json({ error: 'Thread not found.' }, { status: 404 });
   }
@@ -65,8 +65,8 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
     );
   }
 
-  updateChatThread(params.id, updates);
-  const updated = getChatThread(params.id);
+  await updateChatThread(params.id, updates);
+  const updated = await getChatThread(params.id);
   return NextResponse.json({ thread: updated });
 }
 
@@ -77,11 +77,11 @@ export async function DELETE(_req: NextRequest, { params }: { params: { id: stri
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
-  const thread = getChatThread(params.id);
+  const thread = await getChatThread(params.id);
   if (!thread || thread.ownerId !== session.user.id) {
     return NextResponse.json({ error: 'Thread not found.' }, { status: 404 });
   }
 
-  deleteChatThread(params.id);
+  await deleteChatThread(params.id);
   return NextResponse.json({ ok: true });
 }

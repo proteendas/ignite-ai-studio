@@ -16,7 +16,7 @@ const schema = z.object({
 /** Completes a password reset by redeeming a single-use token. */
 export async function POST(req: NextRequest) {
   const ip = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ?? 'unknown';
-  const limit = checkRateLimit(`reset-password:${ip}`, { limit: 10, windowMs: 15 * 60_000 });
+  const limit = await checkRateLimit(`reset-password:${ip}`, { limit: 10, windowMs: 15 * 60_000 });
   if (!limit.allowed) {
     return NextResponse.json({ error: 'Too many attempts. Please try again later.' }, { status: 429 });
   }
@@ -30,7 +30,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const ownerId = consumeAuthToken(hashToken(parsed.data.token), 'password_reset');
+    const ownerId = await consumeAuthToken(hashToken(parsed.data.token), 'password_reset');
     if (!ownerId) {
       return NextResponse.json(
         { error: 'This reset link is invalid or has expired. Request a new one.' },
@@ -38,10 +38,10 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    updateUserPassword(ownerId, await hashPassword(parsed.data.password));
+    await updateUserPassword(ownerId, await hashPassword(parsed.data.password));
 
     // Courtesy notification; a failure here must not fail the reset itself.
-    const user = getUserById(ownerId);
+    const user = await getUserById(ownerId);
     if (user) {
       await sendEmail({
         to: user.email,

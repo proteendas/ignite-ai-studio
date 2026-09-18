@@ -1,7 +1,7 @@
 # Plan — Architecture
 
 ## Stack (retained + added)
-- Next.js 14 App Router, TS strict, Tailwind. Retained: NextAuth (JWT), better-sqlite3, Chroma vector store, multi-provider LLM adapter.
+- Next.js 14 App Router, TS strict, Tailwind. Retained: NextAuth (JWT), multi-provider LLM adapter. **Postgres (`pg`) + pgvector** replaced better-sqlite3 + Chroma in Upgrade 3 — see below.
 - **Added deps**: `bootstrap-icons` (icons), `framer-motion` (minimal transitions), `docx` (content export). No other icon/UI libraries (constitution #6).
 
 ## Theme tokens (Tailwind + CSS variables)
@@ -13,7 +13,7 @@ success/warning/error = red-black-derived tints; status dots the only extra hues
 ```
 Tailwind exposes these as `ignite.*`, `surface.*`, `text.*`. `darkMode: 'class'`; `<html class="dark">` default, toggle flips it and persists to localStorage.
 
-## Data model (SQLite additions)
+## Data model (additions)
 - `users`: + `onboarded_at TEXT NULL`.
 - `user_preferences`: ownerId PK, default_provider, default_model, default_tone, theme.
 - `user_api_keys`: id, ownerId, provider, ciphertext, iv, auth_tag, key_preview, created_at (UNIQUE ownerId+provider). AES-256-GCM via `lib/crypto.ts` keyed off `ENCRYPTION_KEY`.
@@ -70,3 +70,57 @@ Tailwind exposes these as `ignite.*`, `surface.*`, `text.*`. `darkMode: 'class'`
 - `AppShell` = Sidebar (bi icons, active state) + Topbar (theme toggle, provider health pill, user menu) + Toaster.
 - Pages: `/dashboard` (StatTiles, ActivityFeed, QuickActions), `/chat` (ThreadSidebar + ChatWindow + TypingIndicator), `/documents` (Library w/ search), `/content-generator` (Picker → Selector → BatchOutputs), `/settings` (Keys, Defaults, Providers health, Danger zone), `/observability` (usage + logs).
 - Cross-cutting: `Toaster`/`useToast`, `ThemeToggle`, `Skeleton`, `OnboardingTour`, `hoverGlow` utility class.
+
+## Upgrade 3 — Postgres + pgvector (2026-09-18)
+
+### Why
+The data layer assumed a persistent local filesystem: `better-sqlite3` wrote to a file and
+Chroma ran as a long-lived service with a volume. That made the app a single-instance
+application and ruled out serverless hosting entirely — on Vercel, a SQLite file written during
+one invocation is gone by the next. Porting to Postgres was the prerequisite for the free
+Vercel + Neon deployment path.
+
+### Stack changes
+- **`better-sqlite3` → `pg`.** Synchronous calls became async: ~60 exported functions in
+  `lib/db/sql/client.ts` and every call site. No native dependency remains, which also removed
+  the `node-gyp` build failures on newer Node.
+- **Chroma → pgvector (default).** `document_chunks` holds `embedding VECTOR(n)` with an HNSW
+  index under `vector_cosine_ops`. Chroma stays supported behind `VECTOR_DB_PROVIDER=chroma`;
+  the existing `VectorStore` interface meant this was one new module, not a refactor.
+- **Schema `.sql` file → `lib/db/sql/schema.ts`.** Serverless bundlers do not reliably ship
+  loose non-JS assets beside the handler and `__dirname` is unreliable, so the DDL is a string
+  constant and is part of the bundle by construction.
+- **Rate limiter: in-memory Map → `rate_limits` table.** A per-process counter never accumulates
+  when every invocation may get a fresh process, and multiple replicas each enforced their own
+  copy. Now one atomic upsert per check; fails **open** on database unavailability.
+
+### Schema bootstrap
+Applied lazily on a process's first query, behind a memoised promise on `globalThis` (concurrent
+callers in one container share a run) and a Postgres **advisory lock** (concurrent cold-starting
+instances cannot race on `CREATE TABLE IF NOT EXISTS`). A failed bootstrap clears the promise so
+the next request retries. New columns use `ALTER TABLE … ADD COLUMN IF NOT EXISTS`.
+
+### Type coercion
+`node-postgres` returns `TIMESTAMPTZ` as `Date` and `BIGINT` — including `SUM()` over an integer
+column — as a **string**. All mappers funnel through `toIso()` / `toNum()` so driver types never
+reach the application's record types.
+
+### Hardening gained
+- `runReadOnlyQuery` now wraps NL→SQL execution in a `READ ONLY` transaction, so even a bypassed
+  validator cannot write. SQLite could not enforce this.
+- `consumeAuthToken` uses `SELECT … FOR UPDATE`, so a single-use token cannot be redeemed twice
+  by concurrent requests.
+- Rate limits now hold across instances rather than per process.
+
+### Config
+- **Added**: `DATABASE_URL` (required), `PG_POOL_MAX` (default 5), `EMBEDDING_DIMENSIONS`
+  (default 768, must match the embeddings model — `VECTOR(n)` is fixed at table creation).
+- **Removed**: `SQLITE_PATH`.
+- **Changed**: `VECTOR_DB_PROVIDER` now defaults to `pgvector`.
+- `maxDuration` set on ingest, chat, agent, agent-decision and generate-content routes, which
+  legitimately exceed the serverless default.
+
+### Deployment
+Two supported targets, neither needing code changes: a single VM with Docker Compose (app +
+Postgres + Caddy), and **Vercel + Neon** on free tiers. Compose gained a `postgres` service on
+the `pgvector/pgvector:pg16` image; Chroma moved behind a `chroma` profile.
