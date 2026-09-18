@@ -34,6 +34,25 @@ spec-first (see [`/specs`](./specs)).
   **Google Gemini** (free tier) with **HuggingFace** as a fallback. Vector store is Chroma
   (wired); FAISS / Azure AI Search are pluggable stubs.
 
+## Documentation
+
+Full documentation lives in [`/docs`](./docs):
+
+| | |
+| --- | --- |
+| [Getting started](./docs/getting-started.md) | Prerequisites, Docker quick start, first-run walkthrough |
+| [Configuration](./docs/configuration.md) | Every environment variable |
+| [Features](./docs/features.md) | What the product does |
+| [Architecture](./docs/architecture.md) | How it is built, and why |
+| [API reference](./docs/api-reference.md) | Every endpoint |
+| [Data model](./docs/data-model.md) | Schema, ownership, the vector store |
+| [Providers](./docs/providers.md) | Swapping and adding AI providers |
+| [Agent & tools](./docs/agent-tools.md) | The ReAct loop, HITL, adding a tool |
+| [UI & design system](./docs/ui-design-system.md) | Theme tokens and components |
+| [Security](./docs/security.md) | Posture and known limitations |
+| [Contributing](./docs/contributing.md) | Local loop and conventions |
+| **[Deployment](./docs/deployment/README.md)** | **[Single VM / EC2](./docs/deployment/ec2-docker.md)** · **[Free tier](./docs/deployment/serverless-free-tier.md)** |
+
 ## Spec-driven
 
 This upgrade was built spec-first. The [`/specs`](./specs) folder is the source of truth:
