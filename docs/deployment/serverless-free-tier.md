@@ -224,7 +224,22 @@ git push -u origin main
 | `EMAIL_FROM` | `IgniteAI Studio <onboarding@resend.dev>` *(optional)* |
 
 5. Under **Settings → Functions**, set the region to **match your Neon region** from step 4.
-   Every database query crosses this distance.
+   Every database query crosses this distance, and the app makes several per request.
+
+   `vercel.json` in this repo pins `sin1` (Singapore). If your Neon project is elsewhere, change
+   it to match:
+
+   | Neon region | Vercel region |
+   | --- | --- |
+   | AWS Asia Pacific 1 (Singapore) | `sin1` |
+   | AWS US East (Ohio / N. Virginia) | `iad1` |
+   | AWS Europe (Frankfurt) | `fra1` |
+   | AWS Europe (London) | `lhr1` |
+   | AWS Asia Pacific (Mumbai) | `bom1` |
+   | AWS Asia Pacific (Sydney) | `syd1` |
+
+   Mismatching them is not a failure you will see in the logs — it just makes every page
+   quietly slow.
 
 6. Click **Deploy** and wait 2–4 minutes.
 
