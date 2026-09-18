@@ -1,6 +1,7 @@
 'use client';
 
 import clsx from 'clsx';
+import { Select } from '@/components/ui/Select';
 import { ContentType, Tone, Channel } from '@/lib/types';
 
 const CONTENT_TYPES: { value: ContentType; label: string; icon: string }[] = [
@@ -86,18 +87,14 @@ export function ToneChannelSelector({
         <label htmlFor="content-gen-tone" className="mb-1.5 block text-sm font-medium text-content">
           Tone
         </label>
-        <select
+        <Select
           id="content-gen-tone"
+          aria-label="Tone"
           value={tone}
-          onChange={(e) => onToneChange(e.target.value as Tone)}
-          className="focus-ignite w-full rounded-md border border-surface-3 bg-surface-2 px-3 py-2 text-sm text-content transition-colors hover:border-ignite/50 sm:w-64"
-        >
-          {TONES.map((opt) => (
-            <option key={opt.value} value={opt.value}>
-              {opt.label}
-            </option>
-          ))}
-        </select>
+          onChange={(v) => onToneChange(v as Tone)}
+          options={TONES}
+          className="w-full sm:w-64"
+        />
       </div>
 
       <fieldset>

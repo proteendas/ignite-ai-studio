@@ -1,5 +1,6 @@
 'use client';
 
+import { Select } from '@/components/ui/Select';
 import { DocumentRecord } from '@/lib/types';
 
 export function DocumentPicker({
@@ -19,20 +20,19 @@ export function DocumentPicker({
         <i className="bi bi-file-earmark-text mr-1.5 text-content-muted" aria-hidden="true" />
         Source document
       </label>
-      <select
+      <Select
         id="content-gen-document"
+        aria-label="Source document"
         value={value}
-        onChange={(e) => onChange(e.target.value)}
+        onChange={onChange}
         disabled={readyDocs.length === 0}
-        className="focus-ignite w-full rounded-md border border-surface-3 bg-surface-2 px-3 py-2 text-sm text-content transition-colors hover:border-ignite/50 disabled:cursor-not-allowed disabled:opacity-60"
-      >
-        <option value="">Select a document…</option>
-        {readyDocs.map((doc) => (
-          <option key={doc.id} value={doc.id}>
-            {doc.filename}
-          </option>
-        ))}
-      </select>
+        placeholder="Select a document…"
+        options={readyDocs.map((doc) => ({
+          value: doc.id,
+          label: doc.filename,
+          icon: 'bi-file-earmark-text',
+        }))}
+      />
       {readyDocs.length === 0 && (
         <p className="mt-1.5 text-xs text-content-muted">
           No ready documents yet — upload one on the Documents page first.

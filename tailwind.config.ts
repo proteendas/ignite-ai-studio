@@ -52,11 +52,16 @@ const config: Config = {
           from: { transform: 'translateX(120%)', opacity: '0' },
           to: { transform: 'translateX(0)', opacity: '1' },
         },
+        'select-in': {
+          from: { transform: 'translateY(-4px) scale(0.98)', opacity: '0' },
+          to: { transform: 'translateY(0) scale(1)', opacity: '1' },
+        },
       },
       animation: {
         'spin-slow': 'spin-slow 1s linear infinite',
         'typing-bounce': 'typing-bounce 1.2s ease-in-out infinite',
         'toast-in': 'toast-in 0.25s ease-out',
+        'select-in': 'select-in 0.12s ease-out',
       },
     },
   },

@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/Button';
 import { Badge } from '@/components/ui/Badge';
 import { Spinner } from '@/components/ui/Spinner';
 import { Skeleton } from '@/components/ui/Skeleton';
+import { Select } from '@/components/ui/Select';
 import { useToast } from '@/components/ui/Toaster';
 
 const PROVIDER_IDS = [
@@ -169,18 +170,13 @@ export function ApiKeyManager() {
             <label htmlFor="key-provider" className="mb-1 block text-xs text-content-muted">
               Provider
             </label>
-            <select
+            <Select
               id="key-provider"
+              aria-label="Provider"
               value={provider}
-              onChange={(e) => setProvider(e.target.value)}
-              className="focus-ignite w-full rounded-md border border-surface-3 bg-surface-2 px-3 py-2 text-sm text-content"
-            >
-              {PROVIDER_IDS.map((id) => (
-                <option key={id} value={id}>
-                  {id}
-                </option>
-              ))}
-            </select>
+              onChange={setProvider}
+              options={PROVIDER_IDS.map((id) => ({ value: id, label: id }))}
+            />
           </div>
 
           <div>

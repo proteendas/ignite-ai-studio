@@ -5,6 +5,7 @@ import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { Spinner } from '@/components/ui/Spinner';
 import { Skeleton } from '@/components/ui/Skeleton';
+import { Select } from '@/components/ui/Select';
 import { useToast } from '@/components/ui/Toaster';
 import type { Tone } from '@/lib/types';
 
@@ -178,37 +179,29 @@ export function PreferencesForm() {
               <label htmlFor="pref-provider" className="mb-1 block text-xs text-content-muted">
                 Default provider
               </label>
-              <select
+              <Select
                 id="pref-provider"
+                aria-label="Default provider"
                 value={provider}
-                onChange={(e) => setProvider(e.target.value)}
-                className="focus-ignite w-full rounded-md border border-surface-3 bg-surface-2 px-3 py-2 text-sm text-content"
-              >
-                <option value={AUTO}>Auto (best available)</option>
-                {PROVIDER_IDS.map((id) => (
-                  <option key={id} value={id}>
-                    {id}
-                  </option>
-                ))}
-              </select>
+                onChange={setProvider}
+                options={[
+                  { value: AUTO, label: 'Auto (best available)', icon: 'bi-stars' },
+                  ...PROVIDER_IDS.map((id) => ({ value: id, label: id })),
+                ]}
+              />
             </div>
 
             <div>
               <label htmlFor="pref-tone" className="mb-1 block text-xs text-content-muted">
                 Default tone
               </label>
-              <select
+              <Select
                 id="pref-tone"
+                aria-label="Default tone"
                 value={tone}
-                onChange={(e) => setTone(e.target.value)}
-                className="focus-ignite w-full rounded-md border border-surface-3 bg-surface-2 px-3 py-2 text-sm text-content"
-              >
-                {TONES.map((t) => (
-                  <option key={t} value={t}>
-                    {titleCase(t)}
-                  </option>
-                ))}
-              </select>
+                onChange={setTone}
+                options={TONES.map((t) => ({ value: t, label: titleCase(t) }))}
+              />
             </div>
           </div>
 
