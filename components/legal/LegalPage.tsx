@@ -1,5 +1,5 @@
-import Link from 'next/link';
-import { LEGAL_PAGES, LAST_UPDATED, OPERATOR } from './constants';
+import { LAST_UPDATED, OPERATOR } from './constants';
+import { OtherPolicies } from './OtherPolicies';
 
 export { OPERATOR, LAST_UPDATED, LEGAL_PAGES, legalMetadata } from './constants';
 
@@ -40,18 +40,7 @@ export function LegalPage({
         <p className="mb-3 text-xs font-medium uppercase tracking-wide text-content-muted">
           Other policies
         </p>
-        <div className="flex flex-wrap gap-2">
-          {LEGAL_PAGES.map((page) => (
-            <Link
-              key={page.href}
-              href={page.href}
-              className="focus-ignite inline-flex items-center gap-1.5 rounded-full border border-surface-3 bg-surface-2 px-3 py-1 text-xs text-content-muted transition-colors hover:border-ignite/50 hover:text-content"
-            >
-              <i className={`bi ${page.icon}`} aria-hidden="true" />
-              {page.label}
-            </Link>
-          ))}
-        </div>
+        <OtherPolicies />
       </footer>
     </article>
   );

@@ -5,6 +5,7 @@ import { ProtectedShell } from '@/components/layout/ProtectedShell';
 import { Card } from '@/components/ui/Card';
 import { Badge } from '@/components/ui/Badge';
 import { Skeleton } from '@/components/ui/Skeleton';
+import { formatDateTime } from '@/lib/datetime';
 
 interface ProviderUsage {
   provider: string;
@@ -235,7 +236,7 @@ export default function ObservabilityPage() {
                             </td>
                             <td className="py-2 pr-4 text-content-muted">{str(log, 'provider')}</td>
                             <td className="py-2 whitespace-nowrap text-content-muted">
-                              {str(log, 'created_at')}
+                              {formatDateTime(str(log, 'created_at'))}
                             </td>
                           </tr>
                         );
@@ -272,7 +273,7 @@ export default function ObservabilityPage() {
                           </td>
                           <td className="py-2 pr-4 text-ignite-light">{str(log, 'message')}</td>
                           <td className="py-2 whitespace-nowrap text-content-muted">
-                            {str(log, 'created_at')}
+                            {formatDateTime(str(log, 'created_at'))}
                           </td>
                         </tr>
                       ))}

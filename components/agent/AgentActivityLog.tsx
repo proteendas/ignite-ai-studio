@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { Badge } from '@/components/ui/Badge';
 import { Skeleton } from '@/components/ui/Skeleton';
 import type { AgentActionView } from '@/lib/types';
+import { formatDateTime } from '@/lib/datetime';
 
 interface AgentActivityLogProps {
   threadId: string;
@@ -25,12 +26,6 @@ function toolIcon(tool: string): string {
   if (tool.startsWith('github_')) return 'bi-github';
   if (tool === 'email_send') return 'bi-envelope-arrow-up';
   return 'bi-tools';
-}
-
-function formatTimestamp(iso: string): string {
-  const date = new Date(iso.includes('T') ? iso : `${iso.replace(' ', 'T')}Z`);
-  if (Number.isNaN(date.getTime())) return iso;
-  return date.toLocaleString();
 }
 
 /**
@@ -99,8 +94,8 @@ export function AgentActivityLog({ threadId, refreshSignal }: AgentActivityLogPr
               </div>
               <p className="mt-1 break-words text-sm text-content">{action.summary}</p>
               <p className="mt-0.5 text-xs text-content-muted">
-                Created {formatTimestamp(action.createdAt)}
-                {action.decidedAt ? ` · Decided ${formatTimestamp(action.decidedAt)}` : ''}
+                Created {formatDateTime(action.createdAt)}
+                {action.decidedAt ? ` · Decided ${formatDateTime(action.decidedAt)}` : ''}
               </p>
             </div>
           </li>

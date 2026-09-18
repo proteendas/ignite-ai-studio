@@ -7,6 +7,7 @@ import { Badge } from '@/components/ui/Badge';
 import { Spinner } from '@/components/ui/Spinner';
 import { Skeleton } from '@/components/ui/Skeleton';
 import { useToast } from '@/components/ui/Toaster';
+import { formatDate } from '@/lib/datetime';
 
 interface PublicConnection {
   service: string;
@@ -26,12 +27,6 @@ const SERVICE_META: Record<string, { icon: string; title: string }> = {
 
 function serviceMeta(service: string): { icon: string; title: string } {
   return SERVICE_META[service] ?? { icon: 'bi-plug', title: service };
-}
-
-function formatDate(iso: string): string {
-  const date = new Date(iso.includes('T') ? iso : `${iso.replace(' ', 'T')}Z`);
-  if (Number.isNaN(date.getTime())) return iso;
-  return date.toLocaleDateString();
 }
 
 /**

@@ -1,5 +1,7 @@
 'use client';
 
+import { formatRelative, formatDateTime } from '@/lib/datetime';
+
 export interface ActivityItem {
   id: string;
   ownerId: string;
@@ -47,7 +49,9 @@ export function ActivityFeed({ activity }: ActivityFeedProps) {
           </span>
           <div className="min-w-0 flex-1">
             <p className="text-sm text-content">{item.summary}</p>
-            <p className="mt-0.5 text-xs text-content-muted">{item.createdAt}</p>
+            <p className="mt-0.5 text-xs text-content-muted" title={formatDateTime(item.createdAt)}>
+              {formatRelative(item.createdAt)}
+            </p>
           </div>
         </li>
       ))}

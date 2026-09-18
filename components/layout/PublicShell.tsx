@@ -1,4 +1,8 @@
+'use client';
+
 import Link from 'next/link';
+import { usePathname } from 'next/navigation';
+import clsx from 'clsx';
 import { SiteFooter } from '@/components/layout/SiteFooter';
 import { ThemeToggle } from '@/components/ui/ThemeToggle';
 
@@ -14,6 +18,9 @@ export function PublicShell({
   children: React.ReactNode;
   width?: 'narrow' | 'wide';
 }) {
+  const pathname = usePathname();
+  const isActive = (href: string) => pathname === href || pathname?.startsWith(`${href}/`);
+
   return (
     <div className="flex min-h-screen flex-col bg-base">
       <header className="sticky top-0 z-30 flex h-14 shrink-0 items-center justify-between border-b border-surface-3 bg-surface-1/95 px-4 backdrop-blur md:px-8">
@@ -25,18 +32,24 @@ export function PublicShell({
           IgniteAI Studio
         </Link>
         <nav className="flex items-center gap-1">
-          <Link
-            href="/help"
-            className="focus-ignite hidden rounded-md px-3 py-1.5 text-sm text-content-muted transition-colors hover:text-content sm:inline-flex"
-          >
-            Help
-          </Link>
-          <Link
-            href="/legal"
-            className="focus-ignite hidden rounded-md px-3 py-1.5 text-sm text-content-muted transition-colors hover:text-content sm:inline-flex"
-          >
-            Legal
-          </Link>
+          {[
+            { href: '/help', label: 'Help' },
+            { href: '/legal', label: 'Legal' },
+          ].map((item) => (
+            <Link
+              key={item.href}
+              href={item.href}
+              aria-current={isActive(item.href) ? 'page' : undefined}
+              className={clsx(
+                'focus-ignite hidden rounded-md px-3 py-1.5 text-sm transition-colors sm:inline-flex',
+                isActive(item.href)
+                  ? 'font-medium text-ignite-light'
+                  : 'text-content-muted hover:text-content'
+              )}
+            >
+              {item.label}
+            </Link>
+          ))}
           <ThemeToggle />
         </nav>
       </header>
