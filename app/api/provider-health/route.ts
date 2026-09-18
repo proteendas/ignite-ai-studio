@@ -54,11 +54,12 @@ export async function GET() {
   const activeChat = configured[0]?.id ?? null;
   const connectionType = await resolveConnectionType(userId);
   const local = await detectOllama();
+  const activeEmbeddings = await activeEmbeddingsProviderId(userId);
 
   return NextResponse.json({
     providers,
     activeChatProvider: activeChat,
-    activeEmbeddingsProvider: activeEmbeddingsProviderId(userId),
+    activeEmbeddingsProvider: activeEmbeddings,
     vectorDbProvider: env.vectorDbProvider,
     connectionType,
     local,

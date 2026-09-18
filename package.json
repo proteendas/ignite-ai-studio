@@ -7,8 +7,9 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "typecheck": "tsc --noEmit",
-    "verify:db": "node scripts/verify-db.mjs"
+    "typecheck": "tsc --noEmit && node scripts/check-awaits.mjs",
+    "verify:db": "node scripts/verify-db.mjs",
+    "check:awaits": "node scripts/check-awaits.mjs"
   },
   "dependencies": {
     "bcryptjs": "2.4.3",

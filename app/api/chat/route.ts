@@ -200,7 +200,8 @@ export async function POST(req: NextRequest) {
   const lightModel = lightModelFor(provider.id);
   const lightOpts: ChatOptions | undefined = lightModel ? { model: lightModel } : undefined;
 
-  ensureThread(threadId, ownerId);
+  // Must complete before history is read, or the thread row may not exist yet.
+  await ensureThread(threadId, ownerId);
   const history = await getCompressedHistory(threadId, provider);
 
   try {
@@ -303,7 +304,11 @@ export async function POST(req: NextRequest) {
         }
 
         const documentRefs = Array.from(new Set(citations.map((c) => c.documentId)));
-        recordExchange(
+        // Awaited deliberately: on a serverless platform the function can be
+        // frozen the moment the stream closes, so an unawaited write is not
+        // guaranteed to reach the database — the conversation would silently
+        // fail to persist.
+        await recordExchange(
           threadId,
           message,
           fullText,

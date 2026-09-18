@@ -55,7 +55,8 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: msg }, { status: 503 });
   }
 
-  ensureThread(threadId, ownerId);
+  // Must complete before the first message insert, or the thread row is missing.
+  await ensureThread(threadId, ownerId);
   await insertChatMessage({
     id: uuidv4(),
     threadId,
