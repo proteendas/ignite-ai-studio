@@ -61,6 +61,94 @@ body {
     box-shadow: 0 0 0 1px rgba(237, 21, 21, 0.35), 0 0 18px -2px rgba(237, 21, 21, 0.45);
   }
 
+  /*
+   * Typography for the policy pages. Scoped to .legal-prose rather than set
+   * globally so long-form legal copy can breathe without affecting the dense
+   * application UI.
+   */
+  .legal-prose {
+    color: rgb(var(--c-content-muted));
+    font-size: 0.875rem;
+    line-height: 1.75;
+  }
+  .legal-prose h2 {
+    color: rgb(var(--c-content));
+    font-size: 1rem;
+    font-weight: 600;
+    margin-top: 2rem;
+    margin-bottom: 0.75rem;
+  }
+  .legal-prose h3 {
+    color: rgb(var(--c-content));
+    font-size: 0.875rem;
+    font-weight: 600;
+    margin-top: 1.5rem;
+    margin-bottom: 0.5rem;
+  }
+  .legal-prose p {
+    margin-bottom: 1rem;
+  }
+  .legal-prose ul,
+  .legal-prose ol {
+    margin: 0 0 1rem 1.25rem;
+    list-style-position: outside;
+  }
+  .legal-prose ul {
+    list-style-type: disc;
+  }
+  .legal-prose ol {
+    list-style-type: decimal;
+  }
+  .legal-prose li {
+    margin-bottom: 0.5rem;
+    padding-left: 0.25rem;
+  }
+  .legal-prose strong {
+    color: rgb(var(--c-content));
+    font-weight: 600;
+  }
+  .legal-prose a {
+    color: rgb(var(--c-ignite-light));
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+  .legal-prose table {
+    width: 100%;
+    margin-bottom: 1.5rem;
+    border-collapse: collapse;
+    font-size: 0.8125rem;
+  }
+  .legal-prose th,
+  .legal-prose td {
+    border: 1px solid rgb(var(--c-surface-3));
+    padding: 0.5rem 0.75rem;
+    text-align: left;
+    vertical-align: top;
+  }
+  .legal-prose th {
+    background-color: rgb(var(--c-surface-2));
+    color: rgb(var(--c-content));
+    font-weight: 600;
+  }
+
+  /*
+   * Escape hatch: interactive components embedded in a policy page (the cookie
+   * inventory) bring their own layout, so the prose list/heading rules must not
+   * apply inside them.
+   */
+  .legal-prose .not-prose ul,
+  .legal-prose .not-prose ol {
+    margin: 0;
+    list-style: none;
+  }
+  .legal-prose .not-prose li {
+    margin: 0;
+    padding: 0;
+  }
+  .legal-prose .not-prose p {
+    margin: 0;
+  }
+
   /* Accessible focus ring in the ignite palette. */
   .focus-ignite:focus-visible {
     outline: 2px solid var(--ignite-red-light);

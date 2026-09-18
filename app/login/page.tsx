@@ -3,7 +3,9 @@
 import { useState, useEffect, FormEvent } from 'react';
 import { useRouter } from 'next/navigation';
 import { signIn, getProviders } from 'next-auth/react';
+import Link from 'next/link';
 import { PasswordInput } from '@/components/ui/PasswordInput';
+import { SiteFooter } from '@/components/layout/SiteFooter';
 
 type Mode = 'signin' | 'signup';
 
@@ -88,7 +90,8 @@ export default function LoginPage() {
   }
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-base px-4">
+    <div className="flex min-h-screen flex-col bg-base">
+      <div className="flex flex-1 items-center justify-center px-4 py-10">
       <div className="w-full max-w-md rounded-2xl border border-surface-3 bg-surface-1 p-8 shadow-glow-sm">
         <div className="mb-6 text-center">
           <div className="mb-2 flex items-center justify-center gap-2">
@@ -145,12 +148,19 @@ export default function LoginPage() {
           </div>
 
           <div>
-            <label
-              htmlFor="password"
-              className="mb-1 block text-sm font-medium text-content-muted"
-            >
-              Password
-            </label>
+            <div className="mb-1 flex items-baseline justify-between gap-2">
+              <label htmlFor="password" className="block text-sm font-medium text-content-muted">
+                Password
+              </label>
+              {mode === 'signin' && (
+                <Link
+                  href="/forgot-password"
+                  className="focus-ignite text-xs text-ignite-light hover:underline"
+                >
+                  Forgot password?
+                </Link>
+              )}
+            </div>
             <PasswordInput
               id="password"
               value={password}
@@ -164,6 +174,24 @@ export default function LoginPage() {
 
           {error && (
             <p className="text-sm text-ignite-light">{error}</p>
+          )}
+
+          {mode === 'signup' && (
+            <p className="text-xs leading-relaxed text-content-muted">
+              By creating an account you agree to our{' '}
+              <Link href="/legal/terms" className="focus-ignite text-ignite-light hover:underline">
+                Terms of Service
+              </Link>
+              ,{' '}
+              <Link href="/legal/privacy" className="focus-ignite text-ignite-light hover:underline">
+                Privacy Policy
+              </Link>{' '}
+              and{' '}
+              <Link href="/legal/acceptable-use" className="focus-ignite text-ignite-light hover:underline">
+                Acceptable Use Policy
+              </Link>
+              .
+            </p>
           )}
 
           <button
@@ -243,7 +271,21 @@ export default function LoginPage() {
             </div>
           </>
         )}
+
+        <p className="mt-6 text-center text-xs text-content-muted">
+          Need a hand?{' '}
+          <Link href="/help" className="focus-ignite text-ignite-light hover:underline">
+            Help centre
+          </Link>{' '}
+          ·{' '}
+          <Link href="/support" className="focus-ignite text-ignite-light hover:underline">
+            Support
+          </Link>
+        </p>
       </div>
+      </div>
+
+      <SiteFooter />
     </div>
   );
 }

@@ -13,6 +13,13 @@ const NAV_ITEMS = [
   { href: '/settings', label: 'Settings', icon: 'bi-gear' },
 ];
 
+/** Pinned to the bottom of the sidebar, below a divider, away from the app's own sections. */
+const SECONDARY_ITEMS = [
+  { href: '/help', label: 'Help centre', icon: 'bi-life-preserver' },
+  { href: '/support', label: 'Support', icon: 'bi-envelope' },
+  { href: '/legal', label: 'Legal', icon: 'bi-file-earmark-text' },
+];
+
 interface SidebarProps {
   /** Whether the mobile off-canvas drawer is open. Ignored at md+ (always visible there). */
   open: boolean;
@@ -57,7 +64,7 @@ export function Sidebar({ open, onClose }: SidebarProps) {
             <i className="bi bi-x-lg" aria-hidden="true" />
           </button>
         </div>
-        <nav className="flex flex-col gap-1" aria-label="Main navigation">
+        <nav className="flex flex-1 flex-col gap-1" aria-label="Main navigation">
           {NAV_ITEMS.map((item) => {
             const active = pathname === item.href || pathname?.startsWith(item.href + '/');
             return (
@@ -78,6 +85,29 @@ export function Sidebar({ open, onClose }: SidebarProps) {
               </Link>
             );
           })}
+
+          <div className="mt-auto space-y-1 border-t border-surface-3 pt-3">
+            {SECONDARY_ITEMS.map((item) => {
+              const active = pathname === item.href || pathname?.startsWith(item.href + '/');
+              return (
+                <Link
+                  key={item.href}
+                  href={item.href}
+                  aria-current={active ? 'page' : undefined}
+                  onClick={onClose}
+                  className={clsx(
+                    'focus-ignite flex items-center gap-3 rounded-md px-3 py-1.5 text-xs font-medium transition-colors',
+                    active
+                      ? 'bg-ignite/15 text-ignite-light'
+                      : 'text-content-muted hover:bg-surface-2 hover:text-content'
+                  )}
+                >
+                  <i className={`bi ${item.icon}`} aria-hidden="true" />
+                  {item.label}
+                </Link>
+              );
+            })}
+          </div>
         </nav>
       </aside>
     </>
