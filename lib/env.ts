@@ -12,4 +12,13 @@ export const env = {
   ollamaEmbeddingModel: process.env.OLLAMA_EMBEDDING_MODEL || 'nomic-embed-text',
   nextAuthSecret: process.env.NEXTAUTH_SECRET || 'dev-insecure-secret-change-me',
   nextAuthUrl: process.env.NEXTAUTH_URL || 'http://localhost:3000',
+
+  // Transactional email (password reset + email verification) via Resend.
+  // Optional: with no key the mailer logs links to the server console instead
+  // of sending, so the flows still work end-to-end in local development.
+  resendApiKey: process.env.RESEND_API_KEY || '',
+  emailFrom: process.env.EMAIL_FROM || 'IgniteAI Studio <onboarding@resend.dev>',
+
+  // Flips the whole app to the maintenance page (see middleware.ts).
+  maintenanceMode: process.env.MAINTENANCE_MODE === 'true',
 };

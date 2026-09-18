@@ -83,6 +83,7 @@ function migrateExistingTables(db: Database.Database): void {
   ensureColumn('chat_messages', 'document_refs', 'document_refs TEXT');
   ensureColumn('user_preferences', 'connection_type', "connection_type TEXT DEFAULT 'cloud'");
   ensureColumn('user_preferences', 'auto_approve_json', 'auto_approve_json TEXT');
+  ensureColumn('users', 'email_verified_at', 'email_verified_at TEXT');
 }
 
 export function getDb(): Database.Database {
@@ -167,6 +168,7 @@ interface UserRow {
   name: string | null;
   provider: string | null;
   onboarded_at: string | null;
+  email_verified_at: string | null;
   created_at: string;
 }
 
@@ -177,6 +179,7 @@ export interface UserRecord {
   name: string | null;
   provider: string | null;
   onboardedAt: string | null;
+  emailVerifiedAt: string | null;
   createdAt: string;
 }
 
@@ -245,6 +248,7 @@ function mapUserRow(row: UserRow): UserRecord {
     name: row.name,
     provider: row.provider,
     onboardedAt: row.onboarded_at,
+    emailVerifiedAt: row.email_verified_at,
     createdAt: row.created_at,
   };
 }
@@ -354,6 +358,75 @@ export function markOnboarded(ownerId: string): void {
 }
 
 /** Cascade-deletes every row belonging to a user across all tables (account deletion). */
+// ---------------------------------------------------------------------------
+// Email verification + single-use auth tokens (password reset / verify email)
+// ---------------------------------------------------------------------------
+
+export type AuthTokenKind = 'password_reset' | 'email_verification';
+
+export function markEmailVerified(ownerId: string): void {
+  const db = getDb();
+  db.prepare(`UPDATE users SET email_verified_at = datetime('now') WHERE id = ?`).run(ownerId);
+}
+
+/**
+ * Stores the sha256 hash of a freshly minted token. Any outstanding token of
+ * the same kind for this user is dropped first so a new request always
+ * invalidates the previous link.
+ */
+export function createAuthToken(params: {
+  tokenHash: string;
+  ownerId: string;
+  kind: AuthTokenKind;
+  expiresAt: string;
+}): void {
+  const db = getDb();
+  const tx = db.transaction(() => {
+    db.prepare('DELETE FROM auth_tokens WHERE owner_id = ? AND kind = ?').run(
+      params.ownerId,
+      params.kind
+    );
+    db.prepare(
+      `INSERT INTO auth_tokens (token_hash, owner_id, kind, expires_at) VALUES (?, ?, ?, ?)`
+    ).run(params.tokenHash, params.ownerId, params.kind, params.expiresAt);
+  });
+  tx();
+}
+
+/**
+ * Atomically claims a token: returns its owner only if the token exists, is of
+ * the expected kind, has not expired and has not already been consumed. The
+ * consume-and-check happens in one transaction so a token cannot be redeemed
+ * twice by concurrent requests.
+ */
+export function consumeAuthToken(tokenHash: string, kind: AuthTokenKind): string | null {
+  const db = getDb();
+  const tx = db.transaction(() => {
+    const row = db
+      .prepare(
+        `SELECT owner_id FROM auth_tokens
+         WHERE token_hash = ? AND kind = ? AND consumed_at IS NULL
+           AND expires_at > datetime('now')`
+      )
+      .get(tokenHash, kind) as { owner_id: string } | undefined;
+    if (!row) return null;
+    db.prepare(`UPDATE auth_tokens SET consumed_at = datetime('now') WHERE token_hash = ?`).run(
+      tokenHash
+    );
+    return row.owner_id;
+  });
+  return tx();
+}
+
+/** Housekeeping: drop tokens that expired or were used more than a day ago. */
+export function purgeStaleAuthTokens(): void {
+  const db = getDb();
+  db.prepare(
+    `DELETE FROM auth_tokens
+     WHERE expires_at <= datetime('now') OR consumed_at <= datetime('now', '-1 day')`
+  ).run();
+}
+
 export function deleteUserData(ownerId: string): void {
   const db = getDb();
   const tables = [
@@ -368,6 +441,7 @@ export function deleteUserData(ownerId: string): void {
     'request_logs',
     'error_logs',
     'activity_events',
+    'auth_tokens',
   ];
   const tx = db.transaction(() => {
     // chat_messages/thread_summaries are keyed by thread; delete via threads first.

@@ -10,6 +10,7 @@ CREATE TABLE IF NOT EXISTS users (
   name TEXT,
   provider TEXT DEFAULT 'credentials',
   onboarded_at TEXT,
+  email_verified_at TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -182,6 +183,19 @@ CREATE TABLE IF NOT EXISTS embedding_cache (
   PRIMARY KEY (content_hash, provider, model)
 );
 
+-- Single-use, expiring tokens for the email-driven auth flows (password reset
+-- and email verification). Only a sha256 hash of the token is stored, never the
+-- token itself, so a database leak cannot be replayed against the endpoints.
+-- kind: 'password_reset' | 'email_verification'.
+CREATE TABLE IF NOT EXISTS auth_tokens (
+  token_hash TEXT PRIMARY KEY,
+  owner_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  consumed_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- Demo structured-data tables for Level 2 NL -> SQL routing.
 CREATE TABLE IF NOT EXISTS products (
   id INTEGER PRIMARY KEY,
@@ -209,3 +223,4 @@ CREATE INDEX IF NOT EXISTS idx_generated_owner ON generated_content(owner_id);
 CREATE INDEX IF NOT EXISTS idx_agent_actions_thread ON agent_actions(thread_id);
 CREATE INDEX IF NOT EXISTS idx_agent_actions_owner ON agent_actions(owner_id);
 CREATE INDEX IF NOT EXISTS idx_connections_owner ON user_connections(owner_id);
+CREATE INDEX IF NOT EXISTS idx_auth_tokens_owner ON auth_tokens(owner_id, kind);
