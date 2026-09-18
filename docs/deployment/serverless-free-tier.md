@@ -423,7 +423,7 @@ misconfiguration.
 | `DATABASE_URL is not set` | Not added, or added after deploying | Add it and **redeploy** — edits alone do nothing |
 | `too many connections` under load | Using the **direct** Neon endpoint, or `PG_POOL_MAX` too high | Switch to the `-pooler` string; set `PG_POOL_MAX=3` |
 | `The pgvector extension is not available` | The role lacks permission | Neon allows it by default. Elsewhere, run `CREATE EXTENSION vector;` once as a superuser |
-| Upload fails with a dimension error | `EMBEDDING_DIMENSIONS` does not match the model | Fix it, `DROP TABLE document_chunks;`, re-upload |
+| Upload fails with a dimension error | The vector table already holds documents embedded by a different model | Delete those documents (or `DROP TABLE document_chunks;`) and re-upload. An *empty* table is re-created automatically. |
 | Reset emails link to a placeholder domain | `NEXTAUTH_URL` never corrected | Step 9 |
 | Reset emails never arrive | `RESEND_API_KEY` not set | The link is in the Vercel logs instead |
 | Function timeout during ingestion | Document too large for one invocation | Split the document, or upgrade the plan |

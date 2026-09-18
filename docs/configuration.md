@@ -38,27 +38,27 @@ server with `CONNECTION_TYPE=local` or `auto`.
 | `NEXTAUTH_URL` | `http://localhost:3000` | Public base URL. Used for OAuth callbacks and to build password-reset and verification links. **Must be the real public URL in production** or emailed links point at localhost. |
 | `PG_POOL_MAX` | `5` | Max pool connections **per instance**. Keep small on serverless — the platform runs many instances and Postgres limits connections per server, not per instance. |
 | `VECTOR_DB_PROVIDER` | `pgvector` | `pgvector` (default), `chroma`, `faiss` or `azure-ai-search`. `pgvector` and `chroma` are fully wired; the other two are documented stubs in [`lib/db/vector/`](../lib/db/vector/). |
-| `EMBEDDING_DIMENSIONS` | `768` | Width of the pgvector column. **Must match your embeddings model** — see below. |
+| `EMBEDDING_DIMENSIONS` | *(derived)* | **Normally unset.** The pgvector column width is taken from a real embedding at write time; see below. |
 | `CHROMA_URL` | `http://localhost:8000` | Only used with `VECTOR_DB_PROVIDER=chroma`. Under Compose this is `http://chroma:8000`. |
 | `NODE_ENV` | — | Standard Next.js behaviour. |
 | `MAINTENANCE_MODE` | `false` | `true` rewrites every page to `/maintenance` and returns 503 from every API route. Enforced in [`middleware.ts`](../middleware.ts). |
 
-### `EMBEDDING_DIMENSIONS`
+### Embedding width is derived, not configured
 
-The `document_chunks.embedding` column is `VECTOR(n)`, and `n` is fixed when the table is first
-created. It must match the output width of your embeddings model:
+`document_chunks.embedding` is `VECTOR(n)`, fixed when the table is created. The app takes `n`
+from the width of a real embedding on the first write rather than from configuration.
 
-| Model | Value |
-| --- | --- |
-| Gemini *(default)* | **768** |
-| HuggingFace `all-MiniLM-L6-v2` | 384 |
-| OpenAI `text-embedding-3-small` | 1536 |
-| OpenAI `text-embedding-3-large` | 3072 |
-| Ollama `nomic-embed-text` | 768 |
+That is deliberate: the width depends on which model actually answered. Gemini falls back from
+`text-embedding-004` (768) to `gemini-embedding-001` (3072) when the primary is not enabled for a
+key, so any configured value is a guess that eventually blocks ingestion outright.
 
-A mismatch fails on the first insert with an error naming both numbers. To change it:
-`DROP TABLE document_chunks;` and re-ingest — which you would have to do anyway, since vectors
-from different models are not comparable.
+Typical widths, for reference: Gemini 768 or 3072, `all-MiniLM-L6-v2` 384,
+`text-embedding-3-small` 1536, `text-embedding-3-large` 3072, `nomic-embed-text` 768.
+
+**If the width changes** and the vector table is empty, it is dropped and recreated
+automatically. If it already holds documents, ingestion stops with an error telling you to
+re-ingest — recreating it would silently destroy them, and vectors from different models are not
+comparable anyway.
 
 ---
 

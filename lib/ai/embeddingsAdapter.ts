@@ -25,6 +25,12 @@ export interface EmbeddingsProvider {
   id: EmbeddingsProviderId;
   model: string;
   embed(texts: string[]): Promise<number[][]>;
+  /**
+   * The model that will actually answer, when a provider may fall back to a
+   * different one. Used as the embedding-cache key, so a fallback with a
+   * different output width cannot be served under the primary's key.
+   */
+  resolvedModel?(): Promise<string>;
 }
 
 // --- Gemini -----------------------------------------------------------------
@@ -37,11 +43,48 @@ const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta';
 const GEMINI_PRIMARY_MODEL = process.env.GEMINI_EMBED_MODEL || 'text-embedding-004';
 const GEMINI_FALLBACK_MODEL = 'gemini-embedding-001';
 
+/**
+ * Width requested from Gemini.
+ *
+ * text-embedding-004 returns 768. gemini-embedding-001 returns 3072 by
+ * default, which is unusable here: pgvector's HNSW index refuses any column
+ * wider than 2000 dimensions, so those vectors could not be indexed. The newer
+ * model supports `outputDimensionality` (its embeddings are Matryoshka, so a
+ * prefix is a valid smaller embedding), and asking for 768 makes both models
+ * produce the same width — which also removes the "width changed under you"
+ * failure entirely.
+ */
+const GEMINI_OUTPUT_DIMENSIONS = Number(process.env.GEMINI_EMBED_DIMENSIONS || '') || 768;
+
+/**
+ * Scales a vector to unit length. Google recommends this when
+ * outputDimensionality is below the model's native width, because only the
+ * full-width vector is normalised already. Cosine distance is scale-invariant
+ * so ranking is unaffected, but stored vectors stay comparable either way.
+ */
+function normalize(vector: number[]): number[] {
+  let sumSquares = 0;
+  for (const v of vector) sumSquares += v * v;
+  const magnitude = Math.sqrt(sumSquares);
+  if (!magnitude || !Number.isFinite(magnitude)) return vector;
+  return vector.map((v) => v / magnitude);
+}
+
 async function geminiEmbedOne(apiKey: string, model: string, text: string): Promise<number[]> {
+  // outputDimensionality is only honoured by the newer model; text-embedding-004
+  // rejects the field, so it is sent only where it applies.
+  const supportsOutputDimensions = model !== 'text-embedding-004';
+
   const res = await fetch(`${GEMINI_BASE}/models/${model}:embedContent?key=${apiKey}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model: `models/${model}`, content: { parts: [{ text }] } }),
+    body: JSON.stringify({
+      model: `models/${model}`,
+      content: { parts: [{ text }] },
+      ...(supportsOutputDimensions
+        ? { outputDimensionality: GEMINI_OUTPUT_DIMENSIONS }
+        : {}),
+    }),
   });
   if (!res.ok) {
     const body = await res.text();
@@ -52,31 +95,58 @@ async function geminiEmbedOne(apiKey: string, model: string, text: string): Prom
   if (!Array.isArray(values)) {
     throw new Error('Gemini embed returned an unexpected response shape.');
   }
-  return values;
+  // Only the model's native-width output is pre-normalised.
+  return supportsOutputDimensions ? normalize(values as number[]) : (values as number[]);
+}
+
+/**
+ * Which Gemini embedding model this key can actually use, resolved once per
+ * process by trying the primary and falling back.
+ *
+ * Resolving up-front matters for two reasons. The models differ in output width
+ * (text-embedding-004 is 768, gemini-embedding-001 is 3072), so discovering the
+ * fallback mid-batch would produce a document whose chunks have inconsistent
+ * widths. And `model` is part of the embedding cache key, so reporting the
+ * primary while the fallback actually answered would serve 3072-wide vectors
+ * under a 768-wide key.
+ */
+let geminiModelPromise: Promise<string> | undefined;
+
+async function resolveGeminiModel(apiKey: string): Promise<string> {
+  if (!geminiModelPromise) {
+    geminiModelPromise = (async () => {
+      try {
+        await geminiEmbedOne(apiKey, GEMINI_PRIMARY_MODEL, 'probe');
+        return GEMINI_PRIMARY_MODEL;
+      } catch {
+        // Primary is not enabled for this key; the fallback is the wider model.
+        await geminiEmbedOne(apiKey, GEMINI_FALLBACK_MODEL, 'probe');
+        return GEMINI_FALLBACK_MODEL;
+      }
+    })().catch((err) => {
+      geminiModelPromise = undefined;
+      throw err;
+    });
+  }
+  return geminiModelPromise;
 }
 
 function createGeminiEmbeddings(apiKey: string): EmbeddingsProvider {
   return {
     id: 'gemini',
+    // Best known before probing; embed() reports the resolved one via the cache
+    // key it passes upward.
     model: GEMINI_PRIMARY_MODEL,
     async embed(texts: string[]): Promise<number[][]> {
-      // Try the primary model; if it 404s / isn't enabled, fall back once to
-      // the widely-available text-embedding-004.
-      let model = GEMINI_PRIMARY_MODEL;
+      const model = await resolveGeminiModel(apiKey);
       const out: number[][] = [];
-      for (let i = 0; i < texts.length; i++) {
-        try {
-          out.push(await geminiEmbedOne(apiKey, model, texts[i]));
-        } catch (err) {
-          if (model === GEMINI_PRIMARY_MODEL && i === 0) {
-            model = GEMINI_FALLBACK_MODEL;
-            out.push(await geminiEmbedOne(apiKey, model, texts[i]));
-          } else {
-            throw err;
-          }
-        }
+      for (const text of texts) {
+        out.push(await geminiEmbedOne(apiKey, model, text));
       }
       return out;
+    },
+    async resolvedModel(): Promise<string> {
+      return resolveGeminiModel(apiKey);
     },
   };
 }
@@ -193,11 +263,17 @@ export async function embedTexts(texts: string[], userId?: string): Promise<numb
   if (texts.length === 0) return [];
 
   const provider = await resolveEmbeddingsProvider(userId);
+
+  // The cache key must name the model that actually answers. A provider that
+  // falls back to a different model produces vectors of a different width, and
+  // serving those under the primary's key corrupts every later lookup.
+  const cacheModel = provider.resolvedModel ? await provider.resolvedModel() : provider.model;
+
   const hashes = texts.map(sha256Hex);
 
   let cached = new Map<string, number[]>();
   try {
-    cached = await getCachedEmbeddings([...new Set(hashes)], provider.id, provider.model);
+    cached = await getCachedEmbeddings([...new Set(hashes)], provider.id, cacheModel);
   } catch {
     // A cache read failure must never block embedding — fall through and
     // embed everything.
@@ -230,7 +306,7 @@ export async function embedTexts(texts: string[], userId?: string): Promise<numb
       await putCachedEmbeddings(
         misses.map((m, i) => ({ hash: m.hash, vector: vectors[i] })),
         provider.id,
-        provider.model
+        cacheModel
       );
     } catch {
       // A cache write failure must never fail the embed call itself.

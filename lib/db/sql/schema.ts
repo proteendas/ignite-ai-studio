@@ -235,10 +235,25 @@ CREATE INDEX IF NOT EXISTS idx_error_logs_owner      ON error_logs(owner_id, cre
  * managed Postgres role may not have, and a Chroma-backed deployment should
  * not fail to boot over an extension it never uses.
  *
- * VECTOR(<dim>) is fixed at table-creation time and must match the embedding
- * model's output dimensions, so the dimension is interpolated by the caller.
+ * `dimensions` is taken from a real embedding at write time rather than from
+ * configuration: VECTOR(n) is fixed at table creation, and the width depends on
+ * which model actually answered — a provider falling back to a different model
+ * changes it. Guessing here is what produced "Embedding has 3072 dimensions but
+ * the table is VECTOR(768)".
  */
 export function pgvectorSchemaSql(dimensions: number): string {
+  // pgvector refuses an HNSW index on a column wider than 2000 dimensions.
+  // Rather than failing to create the table at all, the index is omitted above
+  // that width: search falls back to a sequential scan, which is slower but
+  // correct. Prefer asking the embeddings model for a narrower vector — see
+  // GEMINI_EMBED_DIMENSIONS — so the index can be used.
+  const HNSW_MAX_DIMENSIONS = 2000;
+  const index =
+    dimensions <= HNSW_MAX_DIMENSIONS
+      ? `CREATE INDEX IF NOT EXISTS idx_chunks_embedding
+  ON document_chunks USING hnsw (embedding vector_cosine_ops);`
+      : `-- No HNSW index: ${dimensions} dimensions exceeds pgvector's 2000 limit.`;
+
   return `
 CREATE EXTENSION IF NOT EXISTS vector;
 
@@ -254,7 +269,6 @@ CREATE TABLE IF NOT EXISTS document_chunks (
 
 CREATE INDEX IF NOT EXISTS idx_chunks_owner_doc ON document_chunks(owner_id, document_id);
 CREATE INDEX IF NOT EXISTS idx_chunks_doc       ON document_chunks(document_id);
-CREATE INDEX IF NOT EXISTS idx_chunks_embedding
-  ON document_chunks USING hnsw (embedding vector_cosine_ops);
+${index}
 `;
 }

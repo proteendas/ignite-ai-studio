@@ -15,11 +15,12 @@ export const env = {
     | 'azure-ai-search',
   chromaUrl: process.env.CHROMA_URL || 'http://localhost:8000',
   /**
-   * Embedding width for the pgvector column. VECTOR(n) is fixed when the table
-   * is created and must match the embedding model's output, so changing the
-   * embeddings model means changing this AND re-ingesting. Defaults to 768
-   * (Gemini's default); all-MiniLM-L6-v2 is 384, OpenAI text-embedding-3-small
-   * is 1536.
+   * Legacy hint for the pgvector column width. **You should not need to set
+   * this.** The table is created from the width of a real embedding at write
+   * time, because the width depends on which model actually answered — a
+   * provider falling back from text-embedding-004 (768) to
+   * gemini-embedding-001 (3072) changes it, and a configured guess then blocks
+   * ingestion entirely. Retained only for reference/diagnostics.
    */
   embeddingDimensions: Number(process.env.EMBEDDING_DIMENSIONS || '') || 768,
 

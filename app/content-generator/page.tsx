@@ -12,6 +12,7 @@ import { DocumentPicker } from '@/components/content-generator/DocumentPicker';
 import { ToneChannelSelector } from '@/components/content-generator/ToneChannelSelector';
 import { BatchOutputs, type BatchResult } from '@/components/content-generator/BatchOutputs';
 import { DocumentRecord, ContentType, Tone, Channel } from '@/lib/types';
+import { SavedContentItem } from '@/components/content-generator/SavedContentItem';
 
 interface GenerateResponse {
   results: BatchResult[];
@@ -277,30 +278,12 @@ export default function ContentGeneratorPage() {
           ) : (
             <ul className="divide-y divide-surface-3">
               {library.map((item) => (
-                <li key={item.id} className="flex items-start justify-between gap-3 py-3">
-                  <div className="min-w-0">
-                    <div className="mb-1 flex flex-wrap items-center gap-1.5">
-                      <Badge tone="brand">{item.contentType}</Badge>
-                      <Badge tone="neutral">
-                        {CHANNEL_LABEL[item.channel as Channel] ?? item.channel}
-                      </Badge>
-                      <Badge tone="neutral">{item.tone}</Badge>
-                    </div>
-                    <p className="line-clamp-2 whitespace-pre-wrap break-words text-sm text-content-muted">
-                      {item.output}
-                    </p>
-                    <p className="mt-1 text-xs text-content-muted">
-                      {new Date(item.createdAt).toLocaleString()}
-                    </p>
-                  </div>
-                  <Button
-                    variant="danger"
-                    onClick={() => handleDeleteSaved(item.id)}
-                    aria-label="Delete saved content"
-                  >
-                    <i className="bi bi-trash" aria-hidden="true" />
-                  </Button>
-                </li>
+                <SavedContentItem
+                  key={item.id}
+                  item={item}
+                  channelLabel={CHANNEL_LABEL[item.channel as Channel] ?? item.channel}
+                  onDelete={handleDeleteSaved}
+                />
               ))}
             </ul>
           )}
