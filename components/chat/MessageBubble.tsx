@@ -3,6 +3,7 @@ import { ChatMode, Citation } from '@/lib/types';
 import { Badge } from '@/components/ui/Badge';
 import { CitationBadge } from './CitationBadge';
 import { CitationsPanel } from './CitationsPanel';
+import { MarkdownContent } from './MarkdownContent';
 import { ProviderBadge } from './ProviderBadge';
 
 /** One inline agent progress line ("planning… using github_list_issues"). */
@@ -97,10 +98,15 @@ export function MessageBubble({ message }: { message: DisplayMessage }) {
           </ul>
         )}
 
-        <p className="whitespace-pre-wrap">
-          {message.content}
-          {message.isStreaming && <span className="ml-0.5 animate-pulse">▍</span>}
-        </p>
+        {isUser ? (
+          <p className="whitespace-pre-wrap">{message.content}</p>
+        ) : (
+          <MarkdownContent
+            content={message.content}
+            citations={message.citations}
+            isStreaming={message.isStreaming}
+          />
+        )}
 
         {!isUser && (message.provider || message.route || message.mode) && (
           <div className="mt-2 flex flex-wrap items-center gap-1.5">
