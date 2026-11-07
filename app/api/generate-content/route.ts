@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth/config';
 import { resolveProvider } from '@/lib/ai/providerAdapter';
-import { buildContentGenPrompt } from '@/lib/ai/prompts';
+import { buildContentGenPrompt, MAX_CONTENT_INSTRUCTIONS } from '@/lib/ai/prompts';
 import { getVectorStore } from '@/lib/db/vector';
 import { getDocumentById, recordUsage, recordActivity } from '@/lib/db/sql/client';
 import { v4 as uuidv4 } from 'uuid';
@@ -25,6 +25,8 @@ interface GenerateContentBody {
   channels?: Channel[];
   /** When true, generation uses a higher temperature for a distinct alternative. */
   variation?: boolean;
+  /** Free-text description of what to write. Required when contentType is 'custom'. */
+  instructions?: string;
 }
 
 interface ChannelResult {
@@ -33,6 +35,16 @@ interface ChannelResult {
 }
 
 const MAX_CONTEXT_CHUNKS = 40;
+
+const VALID_CONTENT_TYPES: ContentType[] = [
+  'social-post',
+  'blog-draft',
+  'ad-copy',
+  'email',
+  'product-description',
+  'sales-pitch',
+  'custom',
+];
 
 const VALID_CHANNELS: Channel[] = [
   'linkedin',
@@ -95,6 +107,24 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  if (!VALID_CONTENT_TYPES.includes(contentType)) {
+    return NextResponse.json({ error: `Unknown content type: ${contentType}.` }, { status: 400 });
+  }
+
+  const instructions = typeof body.instructions === 'string' ? body.instructions.trim() : '';
+  if (instructions.length > MAX_CONTENT_INSTRUCTIONS) {
+    return NextResponse.json(
+      { error: `Instructions must be at most ${MAX_CONTENT_INSTRUCTIONS} characters.` },
+      { status: 400 }
+    );
+  }
+  if (contentType === 'custom' && !instructions) {
+    return NextResponse.json(
+      { error: 'Describe the content you need when using the Custom content type.' },
+      { status: 400 }
+    );
+  }
+
   const channels = uniqueChannels(requestedChannels);
   const invalid = channels.filter((ch) => !VALID_CHANNELS.includes(ch));
   if (invalid.length > 0) {
@@ -142,7 +172,11 @@ export async function POST(req: NextRequest) {
     const results: ChannelResult[] = [];
 
     for (const channel of channels) {
-      const systemPrompt = buildContentGenPrompt(contentType, tone, channel);
+      const systemPrompt = buildContentGenPrompt(contentType, tone, channel, instructions);
+      const target =
+        contentType === 'custom'
+          ? `the content described in the instructions, for ${channel}`
+          : `${contentType} for ${channel}`;
 
       const userPrompt = [
         `Source document: ${doc.filename}`,
@@ -151,8 +185,8 @@ export async function POST(req: NextRequest) {
           : '',
         `Document content:\n${contextBlock}`,
         variation
-          ? `Generate a fresh, distinctly different alternative: ${contentType} for ${channel}, in a ${tone} tone.`
-          : `Generate: ${contentType} for ${channel}, in a ${tone} tone.`,
+          ? `Generate a fresh, distinctly different alternative: ${target}, in a ${tone} tone.`
+          : `Generate: ${target}, in a ${tone} tone.`,
       ]
         .filter(Boolean)
         .join('\n\n');

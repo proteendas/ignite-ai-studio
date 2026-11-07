@@ -17,9 +17,13 @@ function linkifyCitations(text: string): string {
   });
 }
 
-function buildComponents(citations?: Citation[]): Components {
+function buildComponents(citations?: Citation[], preserveLineBreaks?: boolean): Components {
   return {
-    p: ({ children }) => <p className="my-2 leading-relaxed first:mt-0 last:mb-0">{children}</p>,
+    p: ({ children }) => (
+      <p className={`my-2 leading-relaxed first:mt-0 last:mb-0${preserveLineBreaks ? ' whitespace-pre-line' : ''}`}>
+        {children}
+      </p>
+    ),
     h1: ({ children }) => <h1 className="mb-2 mt-4 text-lg font-semibold first:mt-0">{children}</h1>,
     h2: ({ children }) => <h2 className="mb-2 mt-4 text-base font-semibold first:mt-0">{children}</h2>,
     h3: ({ children }) => <h3 className="mb-1.5 mt-3 font-semibold first:mt-0">{children}</h3>,
@@ -91,18 +95,23 @@ export function MarkdownContent({
   content,
   citations,
   isStreaming,
+  preserveLineBreaks,
+  className,
 }: {
   content: string;
   citations?: Citation[];
   isStreaming?: boolean;
+  /** Render single newlines inside a paragraph as line breaks (emails, sign-offs). */
+  preserveLineBreaks?: boolean;
+  className?: string;
 }) {
   // Appending the cursor to the source keeps it inline at the end of the last
   // paragraph instead of dropping onto its own line below the rendered blocks.
   const source = linkifyCitations(content) + (isStreaming ? ' ▍' : '');
 
   return (
-    <div className="break-words">
-      <ReactMarkdown remarkPlugins={[remarkGfm]} components={buildComponents(citations)}>
+    <div className={`break-words${className ? ` ${className}` : ''}`}>
+      <ReactMarkdown remarkPlugins={[remarkGfm]} components={buildComponents(citations, preserveLineBreaks)}>
         {source}
       </ReactMarkdown>
     </div>

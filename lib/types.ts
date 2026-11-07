@@ -7,7 +7,10 @@ export type ContentType =
   | 'blog-draft'
   | 'ad-copy'
   | 'email'
-  | 'product-description';
+  | 'product-description'
+  | 'sales-pitch'
+  /** Free-form: the user's own description defines what to produce. */
+  | 'custom';
 
 /**
  * Chat operating mode, always visible in the UI:

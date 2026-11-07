@@ -1,12 +1,13 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useState } from 'react';
 import clsx from 'clsx';
 import { Button } from '@/components/ui/Button';
 import { Badge } from '@/components/ui/Badge';
 import { Spinner } from '@/components/ui/Spinner';
 import { useToast } from '@/components/ui/Toaster';
-import { exportAsTxt, exportAsMarkdown, exportAsDocx } from '@/lib/export';
+import { MarkdownContent } from '@/components/chat/MarkdownContent';
+import { ExportMenu } from './ExportMenu';
 import { ContentType, Tone, Channel } from '@/lib/types';
 
 export interface OutputMeta {
@@ -15,14 +16,6 @@ export interface OutputMeta {
   tone: Tone;
   channel: Channel;
 }
-
-type ExportFormat = 'txt' | 'md' | 'docx';
-
-const EXPORT_FORMATS: { value: ExportFormat; label: string }[] = [
-  { value: 'txt', label: 'Plain text (.txt)' },
-  { value: 'md', label: 'Markdown (.md)' },
-  { value: 'docx', label: 'Word (.docx)' },
-];
 
 export function OutputEditor({
   content,
@@ -42,27 +35,8 @@ export function OutputEditor({
   isRegenerating?: boolean;
 }) {
   const { toast } = useToast();
-  const [exportOpen, setExportOpen] = useState(false);
   const [saving, setSaving] = useState(false);
-  const menuRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!exportOpen) return;
-    const onDocMouseDown = (e: MouseEvent) => {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
-        setExportOpen(false);
-      }
-    };
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setExportOpen(false);
-    };
-    document.addEventListener('mousedown', onDocMouseDown);
-    document.addEventListener('keydown', onKeyDown);
-    return () => {
-      document.removeEventListener('mousedown', onDocMouseDown);
-      document.removeEventListener('keydown', onKeyDown);
-    };
-  }, [exportOpen]);
+  const [view, setView] = useState<'preview' | 'edit'>('preview');
 
   const filenameBase = `${meta.contentType}-${meta.channel}`;
 
@@ -72,18 +46,6 @@ export function OutputEditor({
       toast('Copied to clipboard.', 'success');
     } catch {
       toast('Could not copy to clipboard.', 'error');
-    }
-  };
-
-  const handleExport = async (fmt: ExportFormat) => {
-    setExportOpen(false);
-    try {
-      if (fmt === 'txt') exportAsTxt(filenameBase, content);
-      else if (fmt === 'md') exportAsMarkdown(filenameBase, content);
-      else await exportAsDocx(filenameBase, content);
-      toast(`Exported as .${fmt}.`, 'success');
-    } catch {
-      toast('Export failed.', 'error');
     }
   };
 
@@ -132,37 +94,7 @@ export function OutputEditor({
             Copy
           </Button>
 
-          <div className="relative" ref={menuRef}>
-            <Button
-              variant="secondary"
-              onClick={() => setExportOpen((o) => !o)}
-              aria-haspopup="menu"
-              aria-expanded={exportOpen}
-            >
-              <i className="bi bi-download" aria-hidden="true" />
-              Export
-              <i className="bi bi-chevron-down text-xs" aria-hidden="true" />
-            </Button>
-            {exportOpen && (
-              <div
-                role="menu"
-                className="absolute right-0 z-20 mt-1 w-52 overflow-hidden rounded-md border border-surface-3 bg-surface-2 py-1 shadow-glow-sm"
-              >
-                {EXPORT_FORMATS.map((fmt) => (
-                  <button
-                    key={fmt.value}
-                    type="button"
-                    role="menuitem"
-                    onClick={() => handleExport(fmt.value)}
-                    className="focus-ignite flex w-full items-center gap-2 px-3 py-2 text-left text-sm text-content transition-colors hover:bg-surface-3"
-                  >
-                    <i className="bi bi-file-earmark-text text-content-muted" aria-hidden="true" />
-                    {fmt.label}
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
+          <ExportMenu filename={filenameBase} content={content} />
 
           <Button variant="secondary" onClick={handleSave} disabled={saving}>
             {saving ? <Spinner /> : <i className="bi bi-save" aria-hidden="true" />}
@@ -184,13 +116,61 @@ export function OutputEditor({
         </div>
       </div>
 
-      <textarea
-        value={content}
-        onChange={(e) => onChange(e.target.value)}
-        rows={16}
-        aria-label={`Generated ${meta.contentType} for ${meta.channel}`}
-        className="focus-ignite w-full rounded-md border border-surface-3 bg-surface-2 p-3 text-sm leading-relaxed text-content transition-colors hover:border-ignite/40"
-      />
+      <div className="overflow-hidden rounded-md border border-surface-3 bg-surface-2">
+        <div
+          role="tablist"
+          aria-label="Output view"
+          className="flex items-center gap-1 border-b border-surface-3 px-2 py-1.5"
+        >
+          {(
+            [
+              { value: 'preview', label: 'Preview', icon: 'bi-eye' },
+              { value: 'edit', label: 'Edit', icon: 'bi-pencil-square' },
+            ] as const
+          ).map((tab) => (
+            <button
+              key={tab.value}
+              type="button"
+              role="tab"
+              aria-selected={view === tab.value}
+              onClick={() => setView(tab.value)}
+              className={clsx(
+                'focus-ignite inline-flex items-center gap-1.5 rounded px-2.5 py-1 text-xs font-medium transition-colors',
+                view === tab.value
+                  ? 'bg-surface-3 text-content'
+                  : 'text-content-muted hover:text-content'
+              )}
+            >
+              <i className={`bi ${tab.icon}`} aria-hidden="true" />
+              {tab.label}
+            </button>
+          ))}
+          {view === 'edit' && (
+            <span className="ml-auto hidden text-xs text-content-muted sm:inline">
+              Markdown supported
+            </span>
+          )}
+        </div>
+
+        {view === 'preview' ? (
+          <div
+            className="max-h-[32rem] min-h-[12rem] cursor-text overflow-y-auto p-4 text-sm text-content"
+            onDoubleClick={() => setView('edit')}
+            title="Double-click to edit"
+          >
+            <MarkdownContent content={content} preserveLineBreaks />
+          </div>
+        ) : (
+          <textarea
+            value={content}
+            onChange={(e) => onChange(e.target.value)}
+            rows={16}
+            autoFocus
+            aria-label={`Generated ${meta.contentType} for ${meta.channel}`}
+            className="focus-ignite block w-full resize-y border-0 bg-transparent p-4 font-mono text-[13px] leading-relaxed text-content"
+          />
+        )}
+      </div>
     </div>
   );
 }

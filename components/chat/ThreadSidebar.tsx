@@ -178,7 +178,7 @@ export function ThreadSidebar({
                 <li key={thread.id}>
                   <div
                     className={clsx(
-                      'group flex items-center gap-1 rounded-md px-2 py-1.5 transition-colors',
+                      'group relative flex items-center gap-1 rounded-md px-2 py-1.5 transition-colors',
                       active
                         ? 'nav-active text-ignite-light'
                         : 'text-content-muted hover:bg-surface-2 hover:text-content',
@@ -215,7 +215,9 @@ export function ThreadSidebar({
                         type="button"
                         onClick={() => onSelect(thread.id)}
                         aria-current={active ? 'true' : undefined}
-                        className="focus-ignite min-w-0 flex-1 truncate rounded text-left text-sm"
+                        // Full width by default; on hover/focus reserve room so the
+                        // title truncates before the overlaid action icons.
+                        className="focus-ignite min-w-0 flex-1 truncate rounded text-left text-sm group-focus-within:pr-[4.75rem] group-hover:pr-[4.75rem]"
                         title={title}
                       >
                         {title}
@@ -223,7 +225,7 @@ export function ThreadSidebar({
                     )}
 
                     {!isEditing && (
-                      <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100">
+                      <div className="invisible absolute inset-y-0 right-1 flex items-center gap-0.5 opacity-0 transition-opacity group-focus-within:visible group-focus-within:opacity-100 group-hover:visible group-hover:opacity-100">
                         <button
                           type="button"
                           onClick={() => togglePin(thread)}

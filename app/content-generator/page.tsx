@@ -47,6 +47,8 @@ export default function ContentGeneratorPage() {
   const [contentType, setContentType] = useState<ContentType>('social-post');
   const [tone, setTone] = useState<Tone>('persuasive');
   const [channels, setChannels] = useState<Channel[]>(['linkedin']);
+  const [instructions, setInstructions] = useState('');
+  const needsInstructions = contentType === 'custom' && !instructions.trim();
 
   const [results, setResults] = useState<BatchResult[]>([]);
   const [provider, setProvider] = useState('');
@@ -100,6 +102,10 @@ export default function ContentGeneratorPage() {
       toast('Select at least one channel.', 'error');
       return;
     }
+    if (needsInstructions) {
+      toast('Describe the content you need for a Custom generation.', 'error');
+      return;
+    }
 
     setIsGenerating(true);
     setResults([]);
@@ -109,7 +115,14 @@ export default function ContentGeneratorPage() {
       const res = await fetch('/api/generate-content', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ documentId, contentType, tone, channels, variation: false }),
+        body: JSON.stringify({
+          documentId,
+          contentType,
+          tone,
+          channels,
+          instructions: instructions.trim() || undefined,
+          variation: false,
+        }),
       });
       const data = (await res.json().catch(() => ({}))) as Partial<GenerateResponse> & {
         error?: string;
@@ -140,7 +153,14 @@ export default function ContentGeneratorPage() {
       const res = await fetch('/api/generate-content', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ documentId, contentType, tone, channels: [channel], variation: true }),
+        body: JSON.stringify({
+          documentId,
+          contentType,
+          tone,
+          channels: [channel],
+          instructions: instructions.trim() || undefined,
+          variation: true,
+        }),
       });
       const data = (await res.json().catch(() => ({}))) as Partial<GenerateResponse> & {
         error?: string;
@@ -211,11 +231,19 @@ export default function ContentGeneratorPage() {
             onContentTypeChange={setContentType}
             onToneChange={setTone}
             onChannelsChange={setChannels}
+            instructions={instructions}
+            onInstructionsChange={setInstructions}
           />
           <div className="flex items-center gap-3">
             <Button
               onClick={handleGenerate}
-              disabled={isGenerating || !documentId || channels.length === 0 || readyCount === 0}
+              disabled={
+                isGenerating ||
+                !documentId ||
+                channels.length === 0 ||
+                readyCount === 0 ||
+                needsInstructions
+              }
             >
               {isGenerating ? <Spinner /> : <i className="bi bi-stars" aria-hidden="true" />}
               {isGenerating
@@ -267,16 +295,16 @@ export default function ContentGeneratorPage() {
           </div>
 
           {libraryLoading ? (
-            <div className="space-y-2">
-              <Skeleton className="h-16 w-full" />
-              <Skeleton className="h-16 w-full" />
+            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+              <Skeleton className="h-36 w-full" />
+              <Skeleton className="h-36 w-full" />
             </div>
           ) : library.length === 0 ? (
             <p className="text-sm text-content-muted">
               Nothing saved yet. Use “Save” on a generated output to keep it here.
             </p>
           ) : (
-            <ul className="divide-y divide-surface-3">
+            <ul className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
               {library.map((item) => (
                 <SavedContentItem
                   key={item.id}
